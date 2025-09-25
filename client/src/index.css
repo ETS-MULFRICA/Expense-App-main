@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+  
+  h1, h2, h3, h4 {
+    @apply font-bold tracking-tight;
+  }
+}
+
+@layer components {
+  .gradient-heading {
+    @apply text-black bg-clip-text;
+  }
+  
+  .card-gradient {
+    @apply bg-white;
+  }
+  
+  .bg-hero {
+    @apply bg-gray-100;
+  }
+  
+  .btn-gradient {
+    @apply bg-black hover:bg-gray-800 text-white transition-all;
+  }
+}
+
+/* Responsive Improvements */
+@layer utilities {
+  .responsive-container {
+    @apply w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+  
+  .responsive-grid {
+    @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4;
+  }
+  
+  .responsive-card {
+    @apply flex flex-col p-4 rounded-lg shadow-md hover:shadow-lg transition-shadow;
+  }
+}

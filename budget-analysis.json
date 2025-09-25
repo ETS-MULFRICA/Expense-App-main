@@ -1,0 +1,127 @@
+{
+  "expenseCategories": {
+    "Debt": [
+      "Credit cards",
+      "Student loans",
+      "Other loans",
+      "Taxes (federal)",
+      "Taxes (state)",
+      "Other"
+    ],
+    "Education": [
+      "Tuition",
+      "Books",
+      "Music lessons",
+      "Other"
+    ],
+    "Entertainment": [
+      "Books",
+      "Concerts/shows",
+      "Games",
+      "Hobbies",
+      "Movies",
+      "Music",
+      "Outdoor activities",
+      "Photography",
+      "Sports",
+      "Theater/plays",
+      "TV",
+      "Other"
+    ],
+    "Everyday": [
+      "Groceries",
+      "Restaurants",
+      "Personal supplies",
+      "Clothes",
+      "Laundry/dry cleaning",
+      "Hair/beauty",
+      "Subscriptions",
+      "Other"
+    ],
+    "Gifts": [
+      "Gifts",
+      "Donations (charity)",
+      "Other"
+    ],
+    "Health/medical": [
+      "Doctors/dental/vision",
+      "Specialty care",
+      "Pharmacy",
+      "Emergency",
+      "Other"
+    ],
+    "Home": [
+      "Rent/mortgage",
+      "Property taxes",
+      "Furnishings",
+      "Lawn/garden",
+      "Supplies",
+      "Maintenance",
+      "Improvements",
+      "Moving",
+      "Other"
+    ],
+    "Insurance": [
+      "Car",
+      "Health",
+      "Home",
+      "Life",
+      "Other"
+    ],
+    "Pets": [
+      "Food",
+      "Vet/medical",
+      "Toys",
+      "Supplies",
+      "Other"
+    ],
+    "Technology": [
+      "Domains & hosting",
+      "Online services",
+      "Hardware",
+      "Software",
+      "Other"
+    ],
+    "Transportation": [
+      "Fuel",
+      "Car payments",
+      "Repairs",
+      "Registration/license",
+      "Supplies",
+      "Public transit",
+      "Other"
+    ],
+    "Travel": [
+      "Airfare",
+      "Hotels",
+      "Food",
+      "Transportation",
+      "Entertainment",
+      "Other"
+    ],
+    "Utilities": [
+      "Phone",
+      "TV",
+      "Internet",
+      "Electricity",
+      "Heat/gas",
+      "Water",
+      "Trash",
+      "Other"
+    ],
+    "Other": [
+      "[Category 1]",
+      "[Category 2]"
+    ]
+  },
+  "incomeCategories": {
+    "Other": [
+      "Transfer from savings",
+      "Interest income",
+      "Dividends",
+      "Gifts",
+      "Refunds",
+      "Other"
+    ]
+  }
+}

@@ -1,0 +1,101 @@
+    }
+  });
+  
+  // -------------------------------------------------------------------------
+  // Expense Routes
+  // -------------------------------------------------------------------------
+  app.get("/api/expenses", requireAuth, async (req, res) => {
+    try {
+      const expenses = await storage.getExpensesByUserId(req.user.id);
+      
+      // Augment each expense with category and subcategory names
+      const augmentedExpenses = await Promise.all(expenses.map(async (expense) => {
+        const category = await storage.getExpenseCategoryById(expense.categoryId);
+        
+        let subcategory = null;
+        if (expense.subcategoryId) {
+          subcategory = await storage.getExpenseSubcategoryById(expense.subcategoryId);
+        }
+        
+        return {
+          ...expense,
+          categoryName: category?.name || 'Unknown',
+          subcategoryName: subcategory?.name || null
+        };
+      }));
+      
+      res.json(augmentedExpenses);
+    } catch (error) {
+      console.error("Error fetching expenses:", error);
+      res.status(500).json({ message: "Failed to fetch expenses" });
+    }
+  });
+
+  app.post("/api/expenses", requireAuth, async (req, res) => {
+    try {
+      // Ensure date is properly parsed, especially if it came as an ISO string
+      const data = req.body;
+      if (data.date && typeof data.date === 'string') {
+        data.date = new Date(data.date);
+      }
+      
+      // Check if we're using legacy or new schema
+      let expense;
+      
+      if ('category' in data) {
+        // Legacy mode (string category)
+        const expenseData = legacyInsertExpenseSchema.parse(data);
+        expense = await storage.createLegacyExpense({
+          ...expenseData,
+          userId: req.user.id
+        });
+      } else {
+        // New mode (category ID)
+        const expenseData = insertExpenseSchema.parse(data);
+        
+        // Verify the category belongs to the user
+        const category = await storage.getExpenseCategoryById(expenseData.categoryId);
+        if (!category || category.userId !== req.user.id) {
+          return res.status(403).json({ message: "Invalid category" });
+        }
+        
+        // If subcategory is provided, verify it belongs to the category
+        if (expenseData.subcategoryId) {
+          const subcategory = await storage.getExpenseSubcategoryById(expenseData.subcategoryId);
+          if (!subcategory || subcategory.categoryId !== expenseData.categoryId) {
+            return res.status(403).json({ message: "Invalid subcategory" });
+          }
+        }
+        
+        expense = await storage.createExpense({
+          ...expenseData,
+          userId: req.user.id
+        });
+      }
+      
+      res.status(201).json(expense);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const validationError = fromZodError(error);
+        res.status(400).json({ message: validationError.message });
+      } else {
+        console.error("Error creating expense:", error);
+        res.status(500).json({ message: "Failed to create expense" });
+      }
+    }
+  });
+
+  app.get("/api/expenses/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const expense = await storage.getExpenseById(id);
+      
+      if (!expense) {
+        return res.status(404).json({ message: "Expense not found" });
+      }
+      
+      if (expense.userId !== req.user.id) {
+        return res.status(403).json({ message: "You don't have permission to access this expense" });
+      }
+      
+      res.json(expense);
