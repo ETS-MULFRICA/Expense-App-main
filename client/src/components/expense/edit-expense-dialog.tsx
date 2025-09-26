@@ -36,6 +36,24 @@ export default function EditExpenseDialog({
   const { user } = useAuth();
   const currencySymbol = user?.currency ? currencySymbols[user.currency] : 'FCFA';
   
+  // Static categories as per add expense dialog
+  const staticCategories = [
+    { id: 1, name: 'Children' },
+    { id: 2, name: 'Debt' },
+    { id: 3, name: 'Education' },
+    { id: 4, name: 'Entertainment' },
+    { id: 5, name: 'Everyday' },
+    { id: 6, name: 'Gifts' },
+    { id: 7, name: 'Health/medical' },
+    { id: 8, name: 'Home' },
+    { id: 9, name: 'Insurance' },
+    { id: 10, name: 'Pets' },
+    { id: 11, name: 'Technology' },
+    { id: 12, name: 'Transportation' },
+    { id: 13, name: 'Travel' },
+    { id: 14, name: 'Utilities' },
+  ];
+
   const form = useForm<InsertExpense>({
     resolver: zodResolver(clientExpenseSchema),
     defaultValues: {
@@ -161,37 +179,29 @@ export default function EditExpenseDialog({
             <FormField
               control={form.control}
               name="categoryId"
-              render={({ field }) => {
-                // Fetch categories
-                const { data: categories } = useQuery<ExpenseCategory[]>({
-                  queryKey: ['/api/expense-categories'],
-                  enabled: !!user
-                });
-                
-                return (
-                  <FormItem>
-                    <FormLabel>Category</FormLabel>
-                    <Select 
-                      onValueChange={(value) => field.onChange(parseInt(value))}
-                      value={field.value ? field.value.toString() : undefined}
-                    >
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select a category" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {categories?.map((category: ExpenseCategory) => (
-                          <SelectItem key={category.id} value={category.id.toString()}>
-                            {category.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                );
-              }}
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Category</FormLabel>
+                  <Select
+                    onValueChange={(value) => field.onChange(parseInt(value))}
+                    value={field.value ? field.value.toString() : undefined}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select a category" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {staticCategories.map((category) => (
+                        <SelectItem key={category.id} value={category.id.toString()}>
+                          {category.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
             />
             
             <FormField

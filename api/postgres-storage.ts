@@ -1,6 +1,5 @@
 import { pool } from './db';
 import session from 'express-session';
-import { IStorage } from './storage';
 import { 
   User, InsertUser, ExpenseCategory, InsertExpenseCategory, Expense, InsertExpense, 
   ExpenseSubcategory, InsertExpenseSubcategory, IncomeCategory, InsertIncomeCategory, 
@@ -8,7 +7,7 @@ import {
   BudgetAllocation, InsertBudgetAllocation
 } from '@shared/schema';
 
-export class PostgresStorage implements IStorage {
+export class PostgresStorage {
   // Create default categories for a new user
   async createDefaultCategories(userId: number): Promise<void> {
     // Default expense categories and subcategories
@@ -147,14 +146,108 @@ export class PostgresStorage implements IStorage {
     }
 
     async getBudgetPerformance(budgetId: number) {
-      // Return object with allocated, spent, remaining, categories
-      // Example stub: you should implement real logic here
-      return {
-        allocated: 0,
-        spent: 0,
-        remaining: 0,
-        categories: []
-      };
+      try {
+        // Get budget details
+        const budgetResult = await pool.query('SELECT * FROM budgets WHERE id = $1', [budgetId]);
+        const budget = budgetResult.rows[0];
+        
+        if (!budget) {
+          return { allocated: 0, spent: 0, remaining: 0, categories: [] };
+        }
+
+        // Get budget allocations with category names
+        const allocationsResult = await pool.query(`
+          SELECT ba.*, ec.name as category_name 
+          FROM budget_allocations ba 
+          JOIN expense_categories ec ON ba.category_id = ec.id 
+          WHERE ba.budget_id = $1
+        `, [budgetId]);
+        
+        const allocations = allocationsResult.rows.map(row => ({
+          id: row.id,
+          budgetId: row.budget_id,
+          categoryId: row.category_id,
+          categoryName: row.category_name,
+          subcategoryId: row.subcategory_id,
+          amount: row.amount,
+          createdAt: row.created_at
+        }));
+
+        console.log('Allocations found:', allocations);
+
+        // Get actual expenses within the budget date range for this user
+        console.log('Budget performance debug:', {
+          budgetId,
+          userId: budget.user_id,
+          startDate: budget.start_date,
+          endDate: budget.end_date
+        });
+
+        const expensesResult = await pool.query(`
+          SELECT e.*, ec.name as category_name 
+          FROM expenses e 
+          JOIN expense_categories ec ON e.category_id = ec.id 
+          WHERE e.user_id = $1 
+          AND e.date >= $2 
+          AND e.date <= $3
+        `, [budget.user_id, budget.start_date, budget.end_date]);
+
+        console.log('Expenses found for budget performance:', expensesResult.rows.length, expensesResult.rows);
+        
+        const expenses = expensesResult.rows.map(row => ({
+          id: row.id,
+          userId: row.user_id,
+          amount: row.amount,
+          description: row.description,
+          date: row.date,
+          categoryId: row.category_id,
+          categoryName: row.category_name,
+          subcategoryId: row.subcategory_id,
+          merchant: row.merchant,
+          notes: row.notes,
+          createdAt: row.created_at
+        }));
+
+        // Calculate spending by category
+        const spendingByCategory = new Map();
+        expenses.forEach(expense => {
+          const categoryId = expense.categoryId;
+          const currentSpending = spendingByCategory.get(categoryId) || 0;
+          spendingByCategory.set(categoryId, currentSpending + expense.amount);
+        });
+
+        // Build category performance data
+        const categoryPerformance = allocations.map(allocation => {
+          const spent = spendingByCategory.get(allocation.categoryId) || 0;
+          return {
+            categoryId: allocation.categoryId,
+            categoryName: allocation.categoryName,
+            allocated: allocation.amount,
+            spent: spent,
+            remaining: allocation.amount - spent
+          };
+        });
+
+        // Calculate totals
+        const totalAllocated = allocations.reduce((sum, alloc) => sum + alloc.amount, 0);
+        const totalSpent = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+        const totalRemaining = budget.amount - totalSpent; // Use budget.amount, not totalAllocated
+
+        return {
+          allocated: totalAllocated,
+          spent: totalSpent,
+          remaining: totalRemaining,
+          categories: categoryPerformance
+        };
+      } catch (error) {
+        console.error('Error calculating budget performance:', error);
+        return {
+          allocated: 0,
+          spent: 0,
+          remaining: 0,
+          categories: []
+        };
+      }
     }
 
     // Admin methods
@@ -341,51 +434,32 @@ export class PostgresStorage implements IStorage {
   }
 
   async createExpense(expense: InsertExpense & { userId: number }): Promise<Expense> {
-  const result = await pool.query(
-    `INSERT INTO expenses 
-      (user_id, amount, description, date, category_id, subcategory_id, merchant, notes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING *`,
-    [
-      expense.userId,
-      expense.amount,
-      expense.description,
-      expense.date,
-      expense.categoryId,
-      expense.subcategoryId || null,
-      expense.merchant || null,
-      expense.notes || null
-    ]
-  );
-  return result.rows[0];
-}
-
-async updateExpense(id: number, expense: InsertExpense & { userId: number }): Promise<Expense> {
-  const result = await pool.query(
-    `UPDATE expenses 
-     SET amount = $1, description = $2, date = $3, category_id = $4, subcategory_id = $5, merchant = $6, notes = $7
-     WHERE id = $8 AND user_id = $9 RETURNING *`,
-    [
-      expense.amount,
-      expense.description,
-      expense.date,
-      expense.categoryId,
-      expense.subcategoryId,
-      expense.merchant,
-      expense.notes,
-      id,
-      expense.userId
-    ]
-  );
-
-  if (result.rows.length === 0) {
-    throw new Error("No expense to update");
+    // Get category name
+    let categoryName = null;
+    if (expense.categoryId) {
+      const catRes = await pool.query('SELECT name FROM expense_categories WHERE id = $1', [expense.categoryId]);
+      categoryName = catRes.rows[0]?.name || null;
+    }
+    const result = await pool.query(
+      'INSERT INTO expenses (user_id, amount, description, date, category_id, category_name, subcategory_id, merchant, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+      [expense.userId, expense.amount, expense.description, expense.date, expense.categoryId, categoryName, expense.subcategoryId, expense.merchant, expense.notes]
+    );
+    return result.rows[0];
   }
 
-  return result.rows[0];
-}
-
-
+  async updateExpense(id: number, expense: InsertExpense & { userId: number }): Promise<Expense> {
+    // Get category name
+    let categoryName = null;
+    if (expense.categoryId) {
+      const catRes = await pool.query('SELECT name FROM expense_categories WHERE id = $1', [expense.categoryId]);
+      categoryName = catRes.rows[0]?.name || null;
+    }
+    const result = await pool.query(
+      'UPDATE expenses SET amount = $1, description = $2, date = $3, category_id = $4, category_name = $5, subcategory_id = $6, merchant = $7, notes = $8 WHERE id = $9 RETURNING *',
+      [expense.amount, expense.description, expense.date, expense.categoryId, categoryName, expense.subcategoryId, expense.merchant, expense.notes, id]
+    );
+    return result.rows[0];
+  }
 
   async deleteExpense(id: number): Promise<void> {
     await pool.query('DELETE FROM expenses WHERE id = $1', [id]);
@@ -393,121 +467,110 @@ async updateExpense(id: number, expense: InsertExpense & { userId: number }): Pr
 
   // Income operations
   async getIncomesByUserId(userId: number): Promise<Income[]> {
-  const result = await pool.query(`
-    SELECT i.*, 
-           c.name AS category_name,
-           sc.name AS subcategory_name
-    FROM incomes i
-    LEFT JOIN income_categories c ON i.category_id = c.id
-    LEFT JOIN income_subcategories sc ON i.subcategory_id = sc.id
-    WHERE i.user_id = $1
-    ORDER BY i.date DESC
-  `, [userId]);
-
-  // Map to camelCase like frontend expects
-  return result.rows.map(row => ({
-    ...row,
-    categoryName: row.category_name !== null ? row.category_name : "Uncategorised",
-    subcategoryName: row.subcategory_name !== null ? row.subcategory_name : null,
-  }));
-
-}
-
+    const result = await pool.query('SELECT * FROM incomes WHERE user_id = $1', [userId]);
+    // Map all fields to camelCase for TS compatibility
+    return result.rows.map(row => ({
+      id: row.id,
+      userId: row.user_id,
+      amount: row.amount,
+      description: row.description,
+      date: row.date,
+      categoryId: row.category_id,
+      categoryName: row.category_name, // Include category_name for custom categories
+      subcategoryId: row.subcategory_id,
+      source: row.source,
+      notes: row.notes,
+      createdAt: row.created_at
+    }));
+  }
 
   async getIncomeById(id: number): Promise<Income | undefined> {
     const result = await pool.query('SELECT * FROM incomes WHERE id = $1', [id]);
     const row = result.rows[0];
     if (!row) return undefined;
-    // Map snake_case to camelCase for compatibility with route checks
+    // Ensure all fields are camelCase for TS compatibility
     return {
-      ...row,
+      id: row.id,
       userId: row.user_id,
+      amount: row.amount,
+      description: row.description,
+      date: row.date,
       categoryId: row.category_id,
+      categoryName: row.category_name, // Include category_name for custom categories
       subcategoryId: row.subcategory_id,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      // add other mappings as needed
+      source: row.source,
+      notes: row.notes,
+      createdAt: row.created_at
     };
   }
 
   async createIncome(income: InsertIncome & { userId: number }): Promise<Income> {
-  const result = await pool.query(
-    `INSERT INTO incomes 
-     (user_id, amount, description, date, category_id, subcategory_id, source, notes) 
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [income.userId, income.amount, income.description, income.date, income.categoryId, income.subcategoryId, income.source, income.notes]
-  );
-
-  // Map category name correctly for frontend
-  if (income.categoryId) {
-    const catRes = await pool.query('SELECT name FROM income_categories WHERE id = $1', [income.categoryId]);
-    result.rows[0].categoryName = catRes.rows[0]?.name || null;
-  } else {
-    result.rows[0].categoryName = null;
+    const result = await pool.query(
+      'INSERT INTO incomes (user_id, amount, description, date, category_id, subcategory_id, source, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [income.userId, income.amount, income.description, income.date, income.categoryId, income.subcategoryId, income.source, income.notes]
+    );
+    return result.rows[0];
   }
-
-  return result.rows[0];
-}
-
-
 
   async updateIncome(id: number, income: InsertIncome & { userId: number }): Promise<Income> {
-  let categoryName: string | null = null;
-
-  if (income.categoryId) {
-    const catRes = await pool.query('SELECT name FROM income_categories WHERE id = $1', [income.categoryId]);
-    categoryName = catRes.rows[0]?.name || null;
+    const result = await pool.query(
+      'UPDATE incomes SET amount = $1, description = $2, date = $3, category_id = $4, subcategory_id = $5, source = $6, notes = $7 WHERE id = $8 RETURNING *',
+      [income.amount, income.description, income.date, income.categoryId, income.subcategoryId, income.source, income.notes, id]
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error('Income not found after update');
+    return {
+      id: row.id,
+      userId: row.user_id,
+      amount: row.amount,
+      description: row.description,
+      date: row.date,
+      categoryId: row.category_id,
+      categoryName: row.category_name, // Include category_name for custom categories
+      subcategoryId: row.subcategory_id,
+      source: row.source,
+      notes: row.notes,
+      createdAt: row.created_at
+    };
   }
 
-  const result = await pool.query(
-    `UPDATE incomes 
-     SET amount = $1, description = $2, date = $3, category_id = $4, subcategory_id = $5, source = $6, notes = $7, category_name = $8
-     WHERE id = $9 RETURNING *`,
-    [income.amount, income.description, income.date, income.categoryId, income.subcategoryId, income.source, income.notes, categoryName, id]
-  );
-
-  return {
-    ...result.rows[0],
-    categoryName: categoryName,
-  };
-}
-
-
-  async deleteIncome(id: number, userId: number) {
-  console.log('[DEBUG] deleteIncome called with:', { id, userId });
-  const res = await pool.query(
-    `DELETE FROM incomes WHERE id = $1 AND user_id = $2 RETURNING *`,
-    [id, userId]
-  );
-
-  if (res.rows.length === 0) {
-    console.log('[DEBUG] No income found to delete for:', { id, userId });
-    return null;
+  async deleteIncome(id: number): Promise<void> {
+    await pool.query('DELETE FROM incomes WHERE id = $1', [id]);
   }
-
-  console.log('[DEBUG] Deleted income:', res.rows[0]);
-  return res.rows[0]; // ✅ return deleted row
-}
-
-
 
   // Budget operations
   async getBudgetsByUserId(userId: number): Promise<Budget[]> {
     const result = await pool.query('SELECT * FROM budgets WHERE user_id = $1', [userId]);
-    return result.rows;
+    // Map database fields to camelCase for TypeScript compatibility
+    return result.rows.map(row => ({
+      id: row.id,
+      userId: row.user_id,
+      name: row.name,
+      period: row.period,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      amount: row.amount,
+      notes: row.notes,
+      createdAt: row.created_at,
+    }));
   }
 
-  async getBudgetById(id: number): Promise<Budget | undefined> {    
+  async getBudgetById(id: number): Promise<Budget | undefined> {
     const result = await pool.query('SELECT * FROM budgets WHERE id = $1', [id]);
     const row = result.rows[0];
     if (!row) return undefined;
-    // Map snake_case to camelCase for compatibility with route checks
+    
+    // Map database fields to camelCase for TypeScript compatibility
     return {
-      ...row,
+      id: row.id,
       userId: row.user_id,
+      name: row.name,
+      period: row.period,
       startDate: row.start_date,
       endDate: row.end_date,
-      // add other mappings as needed
+      amount: row.amount,
+      notes: row.notes,
+      createdAt: row.created_at,
     };
   }
 
@@ -516,62 +579,85 @@ async updateExpense(id: number, expense: InsertExpense & { userId: number }): Pr
       'INSERT INTO budgets (user_id, name, start_date, end_date, amount, period, notes) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
       [budget.userId, budget.name, budget.startDate, budget.endDate, budget.amount, budget.period, budget.notes]
     );
-    return result.rows[0];
+    const row = result.rows[0];
+    // Map database fields to camelCase for TypeScript compatibility
+    return {
+      id: row.id,
+      userId: row.user_id,
+      name: row.name,
+      period: row.period,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      amount: row.amount,
+      notes: row.notes,
+      createdAt: row.created_at,
+    };
   }
 
-  async updateBudget(
-  id: number,
-  budgetData: { name: string; startDate: Date; endDate: Date; amount: number; period?: string; notes?: string | null; userId: number }
-) {
-  const result = await pool.query(
-    `UPDATE budgets
-     SET name=$1, start_date=$2, end_date=$3, amount=$4, period=$5, notes=$6
-     WHERE id=$7 AND user_id=$8
-     RETURNING *`,
-    [
-      budgetData.name,
-      budgetData.startDate,
-      budgetData.endDate,
-      budgetData.amount,
-      budgetData.period,
-      budgetData.notes,
-      id,
-      budgetData.userId, // ✅ ensures only the owner can update
-    ]
-  );
+  async updateBudget(id: number, budget: InsertBudget): Promise<Budget> {
+    const result = await pool.query(
+      'UPDATE budgets SET name = $1, start_date = $2, end_date = $3, amount = $4, period = $5, notes = $6 WHERE id = $7 RETURNING *',
+      [budget.name, budget.startDate, budget.endDate, budget.amount, budget.period, budget.notes, id]
+    );
+    const row = result.rows[0];
+    // Map database fields to camelCase for TypeScript compatibility
+    return {
+      id: row.id,
+      userId: row.user_id,
+      name: row.name,
+      period: row.period,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      amount: row.amount,
+      notes: row.notes,
+      createdAt: row.created_at,
+    };
+  }
 
-  if (result.rows.length === 0) throw new Error("No budget to update");
-  return result.rows[0];
-}
-
-
-
-async deleteBudget(id: number, userId: number): Promise<void> {
-  const result = await pool.query(
-    'DELETE FROM budgets WHERE id = $1 AND user_id = $2 RETURNING *',
-    [id, userId]
-  );
-
-  if (result.rows.length === 0) throw new Error("No budget to delete");
-}
-
-
-
-  
-
+  async deleteBudget(id: number): Promise<void> {
+    await pool.query('DELETE FROM budgets WHERE id = $1', [id]);
+  }
 
   // Budget Allocation operations
   async getBudgetAllocations(budgetId: number): Promise<BudgetAllocation[]> {
-    const result = await pool.query('SELECT * FROM budget_allocations WHERE budget_id = $1', [budgetId]);
+    const result = await pool.query(`
+      SELECT 
+        ba.id,
+        ba.budget_id as "budgetId",
+        ba.category_id as "categoryId", 
+        ba.subcategory_id as "subcategoryId",
+        ba.amount,
+        ba.created_at as "createdAt",
+        ec.name as "categoryName"
+      FROM budget_allocations ba
+      LEFT JOIN expense_categories ec ON ba.category_id = ec.id
+      WHERE ba.budget_id = $1
+      ORDER BY ba.created_at DESC
+    `, [budgetId]);
     return result.rows;
   }
 
   async createBudgetAllocation(allocation: InsertBudgetAllocation): Promise<BudgetAllocation> {
-    const result = await pool.query(
-      'INSERT INTO budget_allocations (budget_id, category_id, subcategory_id, amount) VALUES ($1, $2, $3, $4) RETURNING *',
-      [allocation.budgetId, allocation.categoryId, allocation.subcategoryId, allocation.amount]
-    );
-    return result.rows[0];
+    const result = await pool.query(`
+      INSERT INTO budget_allocations (budget_id, category_id, subcategory_id, amount) 
+      VALUES ($1, $2, $3, $4) 
+      RETURNING 
+        id,
+        budget_id as "budgetId",
+        category_id as "categoryId", 
+        subcategory_id as "subcategoryId",
+        amount,
+        created_at as "createdAt"
+    `, [allocation.budgetId, allocation.categoryId, allocation.subcategoryId, allocation.amount]);
+    
+    // Get the category name
+    const categoryResult = await pool.query('SELECT name FROM expense_categories WHERE id = $1', [allocation.categoryId]);
+    const categoryName = categoryResult.rows[0]?.name || 'Unknown';
+    
+    return {
+      ...result.rows[0],
+      categoryName
+    };
   }
 
   async updateBudgetAllocation(id: number, allocation: InsertBudgetAllocation): Promise<BudgetAllocation> {

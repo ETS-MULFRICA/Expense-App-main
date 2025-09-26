@@ -287,40 +287,43 @@ export default function RecentExpenses({
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center">
-                          <div className={`flex-shrink-0 h-8 w-8 rounded-full ${iconColorClass} flex items-center justify-center`}>
-                            {icon}
-                          </div>
-                          <div className="ml-4 flex items-center gap-2">
-                            <div>
-                              <div className="text-sm font-medium text-gray-900">
-                                {expense.description}
+                          <div className="flex-1 relative">
+                            <div className="flex items-center">
+                              <div className={`flex-shrink-0 h-4 w-4 mr-3 ${iconColorClass}`}>
+                                {icon}
                               </div>
-                              {expense.merchant && (
-                                <div className="text-sm text-gray-500">
-                                  {expense.merchant}
+                              <div className="flex-1">
+                                <div className="text-sm font-medium text-gray-900">
+                                  {expense.description}
                                 </div>
-                              )}
-                            </div>
-                            <Popover>
-                              <PopoverTrigger asChild>
-                                <div className="flex-shrink-0 h-8 w-8 rounded-full bg-gray-200 flex items-center justify-center cursor-pointer hover:bg-gray-300 transition" tabIndex={0}>
-                                  <MoreHorizontal className="h-4 w-4 text-gray-700" />
-                                </div>
-                              </PopoverTrigger>
-                              <PopoverContent className="w-64 p-4" align="start">
-                                <div className="flex flex-col gap-2">
-                                  <div className="font-semibold text-sm mb-1">Expense Notes</div>
-                                  <div className="text-gray-700 text-sm min-h-[40px]">
-                                    {expense.notes ? expense.notes : <span className="italic text-gray-400">No notes provided.</span>}
+                                {expense.merchant && (
+                                  <div className="text-sm text-gray-500">
+                                    {expense.merchant}
                                   </div>
-                                  <Button variant="outline" size="sm" className="self-end mt-2" onClick={e => {
-                                    (e.target as HTMLElement).closest('[data-radix-popper-content-wrapper]')?.parentElement?.querySelector('[tabindex="0"]')?.focus();
-                                  }}>
-                                    Close
-                                  </Button>
-                                </div>
-                              </PopoverContent>
-                            </Popover>
+                                )}
+                              </div>
+                              <Popover>
+                                <PopoverTrigger asChild>
+                                  <div className="ml-2 flex-shrink-0 h-5 w-5 rounded-full bg-gray-100 flex items-center justify-center cursor-pointer hover:bg-gray-200 transition" tabIndex={0}>
+                                    <MoreHorizontal className="h-3 w-3 text-gray-600" />
+                                  </div>
+                                </PopoverTrigger>
+                                <PopoverContent className="w-64 p-4" align="start">
+                                  <div className="flex flex-col gap-2">
+                                    <div className="font-semibold text-sm mb-1">Expense Notes</div>
+                                    <div className="text-gray-700 text-sm min-h-[40px]">
+                                      {expense.notes ? expense.notes : <span className="italic text-gray-400">No notes provided.</span>}
+                                    </div>
+                                    <Button variant="outline" size="sm" className="self-end mt-2" onClick={e => {
+                                      const focusElement = (e.target as HTMLElement).closest('[data-radix-popper-content-wrapper]')?.parentElement?.querySelector('[tabindex="0"]') as HTMLElement;
+                                      focusElement?.focus();
+                                    }}>
+                                      Close
+                                    </Button>
+                                  </div>
+                                </PopoverContent>
+                              </Popover>
+                            </div>
                           </div>
                         </div>
                       </td>

@@ -17,6 +17,7 @@ declare global {
       user?: User;
     }
   }
+  
 }
 
 const scryptAsync = promisify(scrypt);
@@ -26,6 +27,7 @@ async function hashPassword(password: string) {
   const buf = (await scryptAsync(password, salt, 64)) as Buffer;
   return `${buf.toString("hex")}.${salt}`;
 }
+ // For debugging in console
 
 async function comparePasswords(supplied: string, stored: string) {
   const [hashed, salt] = stored.split(".");
@@ -61,7 +63,11 @@ export function setupAuth(app: Express) {
       try {
         const result = await client.query('SELECT * FROM users WHERE username = $1', [username]);
         const user = result.rows[0];
-        if (!user || !(await comparePasswords(password, user.password))) {
+        console.log("Authenticating user:",{ user, username, password });
+        const check = await comparePasswords(password, user.password);
+        console.log("Password check result:", check);
+        console.log("Hashed password:", await hashPassword(password));
+        if (!user || !check) {
           return done(null, false);
         } else {
           return done(null, user);
@@ -91,6 +97,8 @@ export function setupAuth(app: Express) {
   });
 
   app.post("/api/register", async (req, res, next) => {
+    console.log("[DEBUG] /api/register headers:", req.headers);
+    console.log("[DEBUG] /api/register body:", req.body);
     console.log("Register endpoint hit with data:", req.body);
     const client = await pool.connect();
     try {
@@ -136,6 +144,8 @@ export function setupAuth(app: Express) {
   });
 
   app.post("/api/login", (req, res, next) => {
+    console.log("[DEBUG] /api/login headers:", req.headers);
+    console.log("[DEBUG] /api/login body:", req.body);
     passport.authenticate("local", (err: any, user: any, info: any) => {
       if (err) return next(err);
       if (!user) {

@@ -201,8 +201,6 @@ export interface Database {
           source: string | null
           notes: string | null
           created_at: string
-          categoryName?: string   // ✅ add this
-          subcategoryName?: string
         }
         Insert: {
           id?: number

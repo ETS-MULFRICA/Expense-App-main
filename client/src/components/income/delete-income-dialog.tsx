@@ -30,16 +30,21 @@ export function DeleteIncomeDialog({
 
   const deleteMutation = useMutation({
     mutationFn: async () => {
+      console.log("Mutation function start");
       if (!income) throw new Error("No income to delete");
+      console.log("Sending DELETE", income.id);
       await apiRequest("DELETE", `/api/incomes/${income.id}`);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/incomes"] });
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/incomes"] });
+      await queryClient.refetchQueries({ queryKey: ["/api/incomes"] });
       toast({
         title: "Income deleted",
         description: "The income record has been deleted successfully.",
       });
-      onClose();
+      setTimeout(() => {
+        onClose();
+      }, 100); // Ensure dialog closes after mutation completes
     },
     onError: (error) => {
       toast({
@@ -50,9 +55,11 @@ export function DeleteIncomeDialog({
     },
   });
 
-  const handleDelete = () => {
+  const handleDelete = (e: React.MouseEvent) => {
+    e.preventDefault();
+    console.log("Deleting income", income);
     deleteMutation.mutate();
-  };
+  }
 
   if (!income) return null;
 

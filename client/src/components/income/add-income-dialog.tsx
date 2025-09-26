@@ -41,29 +41,54 @@ import {
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 
+
 interface AddIncomeDialogProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
 export function AddIncomeDialog({ isOpen, onClose }: AddIncomeDialogProps) {
+  console.log('AddIncomeDialog mounted. isOpen:', isOpen);
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const { toast } = useToast();
-  
-  // Get income categories from API
-  const { data: categories, isLoading: isCategoriesLoading } = useQuery<IncomeCategory[]>({
-    queryKey: ["/api/income-categories"],
-    enabled: isOpen, // Only fetch when dialog is open
-  });
+  // System categories for dropdown
+// System categories for dropdown (use id=0 so they don’t conflict with DB IDs)
+const systemCategories: IncomeCategory[] = [
+  { id: 0, name: 'Wages', userId: 0, description: null, isSystem: true, createdAt: new Date() },
+  { id: 0, name: 'Deals', userId: 0, description: null, isSystem: true, createdAt: new Date() },
+  { id: 0, name: 'Other', userId: 0, description: null, isSystem: true, createdAt: new Date() },
+];
+  // Fetched categories for dropdown (merged with systemCategories)
+  const [categories, setCategories] = useState<IncomeCategory[]>(systemCategories);
+  useEffect(() => {
+    async function fetchCategories() {
+      try {
+        const resp = await apiRequest("GET", "/api/income-categories");
+        const data = await resp.json();
+        // Merge systemCategories with fetched categories, avoiding duplicates by name
+        const merged: IncomeCategory[] = [...systemCategories];
+        data.forEach((cat: IncomeCategory) => {
+          if (!merged.some(sysCat => sysCat.name.trim().toLowerCase() === cat.name.trim().toLowerCase())) {
+            merged.push(cat);
+          }
+        });
+        setCategories(merged);
+      } catch (err) {
+        console.error("Failed to fetch income categories", err);
+      }
+    }
+    fetchCategories();
+  }, []);
 
-  const form = useForm<InsertIncome>({
+  const form = useForm<any>({
     resolver: zodResolver(clientIncomeSchema),
     defaultValues: {
       description: "",
-      amount: 0,
+      amount: "",
       date: new Date(),
       categoryId: 0,
+      categoryName: "",
       source: "",
       notes: "",
     },
@@ -74,15 +99,15 @@ export function AddIncomeDialog({ isOpen, onClose }: AddIncomeDialogProps) {
     if (isOpen) {
       form.reset({
         description: "",
-        amount: 0,
+        amount: "",
         date: new Date(),
         categoryId: 0,
+        categoryName: "",
         source: "",
         notes: "",
       });
     }
   }, [isOpen, form]);
-
   const createMutation = useMutation({
     mutationFn: async (data: InsertIncome) => {
       const resp = await apiRequest("POST", "/api/incomes", data);
@@ -97,26 +122,55 @@ export function AddIncomeDialog({ isOpen, onClose }: AddIncomeDialogProps) {
       onClose();
       form.reset();
     },
-    onError: (error) => {
+    onError: (error: any) => {
       toast({
         title: "Error",
-        description: `Failed to add income: ${error.message}`,
-        variant: "destructive",
+        description: `Failed to add income: ${error?.message || error}`,
+        variant: "destructive"
       });
     },
   });
 
-  const onSubmit = (data: InsertIncome) => {
-    // Parse amount to number if it's a string
-    const amount = typeof data.amount === "string" 
-      ? parseInt((data.amount as string).replace(/[^0-9]/g, ""), 10) 
-      : data.amount;
-    
-    createMutation.mutate({
-      ...data,
-      amount,
-    });
-  };
+  const onSubmit = async (data: any) => {
+  console.log('DEBUG: Submitting income form data:', data);
+  // Parse amount to number if it's a string
+  const amount = typeof data.amount === "string"
+    ? parseFloat(data.amount.replace(/[^0-9.]/g, ""))
+    : data.amount;
+
+  // No need to check categories array, only use systemCategories and manual entry
+
+  // Always get the latest value from form state
+  const categoryName = form.getValues('categoryName');
+  // Find category by name from fetched categories
+  const found = categories.find(cat =>
+    cat.name.trim().toLowerCase() === (categoryName || '').trim().toLowerCase()
+  );
+
+  // Prevent submission if categoryName is empty
+  if (!categoryName || categoryName.trim() === "") {
+    toast({ title: "Error", description: "Category is required.", variant: "destructive" });
+    return;
+  }
+
+  let payload;
+  if (found) {
+    // Existing category
+    payload = { ...data, amount, categoryId: found.id, categoryName: found.name };
+  } else {
+    // Custom category: assign id=0
+    payload = { ...data, amount, categoryId: 0, categoryName };
+  }
+  // Debug: Confirm payload includes categoryId or categoryName
+  if (payload.categoryId) {
+    console.log('[DEBUG] Submitting with categoryId:', payload.categoryId, 'categoryName:', payload.categoryName);
+  } else {
+    console.log('[DEBUG] Submitting with new categoryName:', payload.categoryName);
+  }
+  console.log('DEBUG: Payload sent to backend:', payload);
+  createMutation.mutate(payload);
+};
+
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -160,12 +214,18 @@ export function AddIncomeDialog({ isOpen, onClose }: AddIncomeDialogProps) {
                     <FormLabel>Amount* ({user?.currency || "XAF"})</FormLabel>
                     <FormControl>
                       <Input
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         placeholder="Enter amount"
-                        {...field}
+                        value={field.value === undefined || field.value === null ? "" : String(field.value)}
                         onChange={(e) => {
-                          const value = e.target.value;
-                          field.onChange(value === "" ? 0 : Number(value));
+                          let value = e.target.value.replace(/[^0-9.]/g, "");
+                          // If empty, set undefined, else convert to number
+                          if (value === "") {
+                            form.setValue("amount", undefined, { shouldValidate: true });
+                          } else {
+                            form.setValue("amount", Number(value), { shouldValidate: true });
+                          }
                         }}
                       />
                     </FormControl>
@@ -219,41 +279,36 @@ export function AddIncomeDialog({ isOpen, onClose }: AddIncomeDialogProps) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <FormField
                 control={form.control}
-                name="categoryId"
+                name="categoryName"
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Category*</FormLabel>
-                    <Select
-                      disabled={isCategoriesLoading}
-                      onValueChange={(value) => field.onChange(Number(value))}
-                      value={field.value ? field.value.toString() : undefined}
-                    >
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select category" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {isCategoriesLoading ? (
-                          <SelectItem value="loading" disabled>
-                            Loading categories...
-                          </SelectItem>
-                        ) : categories && categories.length > 0 ? (
-                          categories.map((category) => (
-                            <SelectItem
-                              key={category.id}
-                              value={category.id.toString()}
-                            >
-                              {category.name}
-                            </SelectItem>
-                          ))
-                        ) : (
-                          <SelectItem value="none" disabled>
-                            No categories available
-                          </SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
+                    <FormControl>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <Select
+                          onValueChange={value => {
+                            form.setValue('categoryName', value, { shouldValidate: true });
+                          }}
+                          value={categories.some(cat => cat.name === field.value) ? field.value : ''}
+                        >
+                          <SelectTrigger className="w-40">
+                            <SelectValue placeholder="System category" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {categories.map((cat: IncomeCategory) => (
+                              <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Input
+                          placeholder="Or type custom category"
+                          value={typeof field.value === 'string' ? field.value : ''}
+                          onChange={e => {
+                            form.setValue('categoryName', e.target.value, { shouldValidate: true });
+                          }}
+                        />
+                      </div>
+                    </FormControl>
                     <FormMessage />
                   </FormItem>
                 )}

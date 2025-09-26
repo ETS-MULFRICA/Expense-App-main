@@ -154,6 +154,7 @@ export default function BudgetDetailsDialog({
       return response.json();
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/budgets/${budgetId}`] });
       queryClient.invalidateQueries({ queryKey: [`/api/budgets/${budgetId}/allocations`] });
       queryClient.invalidateQueries({ queryKey: [`/api/budgets/${budgetId}/performance`] });
       queryClient.invalidateQueries({ queryKey: ["/api/budgets"] });
@@ -184,6 +185,7 @@ export default function BudgetDetailsDialog({
       }
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/budgets/${budgetId}`] });
       queryClient.invalidateQueries({ queryKey: [`/api/budgets/${budgetId}/allocations`] });
       queryClient.invalidateQueries({ queryKey: [`/api/budgets/${budgetId}/performance`] });
       queryClient.invalidateQueries({ queryKey: ["/api/budgets"] });

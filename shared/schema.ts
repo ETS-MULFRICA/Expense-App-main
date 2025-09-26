@@ -75,7 +75,8 @@ export const incomes = pgTable("incomes", {
   amount: doublePrecision("amount").notNull(),
   description: text("description").notNull(),
   date: timestamp("date").notNull(),
-  categoryId: integer("category_id").notNull().references(() => incomeCategories.id),
+  categoryId: integer("category_id").references(() => incomeCategories.id), // Made nullable for custom categories
+  categoryName: text("category_name"), // Added to store custom category names
   subcategoryId: integer("subcategory_id").references(() => incomeSubcategories.id),
   source: text("source"),
   notes: text("notes"),
@@ -162,6 +163,19 @@ export const insertExpenseSchema = createInsertSchema(expenses)
     notes: true,
   });
 
+export const updateExpenseSchema = z.object({
+  date: z.date(),
+  amount: z.number(),
+  description: z.string(),
+  categoryId: z.number(),
+  categoryName: z.string().optional(), // <-- add this
+  subcategoryId: z.number().optional(),
+  merchant: z.string().optional(),
+  notes: z.string().optional(),
+});
+
+export type UpdateExpense = z.infer<typeof updateExpenseSchema>;
+
 // Income schema
 export const insertIncomeSchema = createInsertSchema(incomes)
   .pick({
@@ -236,11 +250,7 @@ export type Expense = typeof expenses.$inferSelect & { category_name?: string };
 export type InsertExpense = z.infer<typeof insertExpenseSchema>;
 export type LegacyInsertExpense = z.infer<typeof legacyInsertExpenseSchema>;
 
-export type Income = typeof incomes.$inferSelect & {
-  categoryName?: string | null;
-  subcategoryName?: string | null;
-};
-
+export type Income = typeof incomes.$inferSelect;
 export type InsertIncome = z.infer<typeof insertIncomeSchema>;
 
 export type Budget = typeof budgets.$inferSelect;

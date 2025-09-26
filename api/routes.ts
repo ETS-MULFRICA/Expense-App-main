@@ -1,10 +1,10 @@
 // Import Express types and HTTP server creation
-import type { Express, Request, Response, Router } from "express";
+import type { Express, Request, Response } from "express";
+import cors from "cors";
+import { corsOptions } from "./cors-config";
 import { createServer, type Server } from "http";
 // Import database storage layer
-import { PostgresStorage } from "./postgres-storage";
-import session from "express-session";
-const storage = new PostgresStorage(new session.MemoryStore());
+import { storage } from "./storage";
 import { pool } from "./db";
 // Import authentication setup
 import { setupAuth } from "./auth";
@@ -24,11 +24,24 @@ import { fromZodError } from "zod-validation-error";
  * Checks if user is logged in before allowing access to protected routes
  * Returns 401 Unauthorized if user is not authenticated
  */
-const requireAuth = (req: Request, res: Response, next: Function) => {
-  if (!req.isAuthenticated()) {
+const requireAuth = async (req: Request, res: Response, next: Function) => {
+  if (!req.isAuthenticated() || !req.user) {
     return res.sendStatus(401);
   }
-  next();
+  try {
+    // Check user existence in DB on every request
+    const userId = req.user.id;
+    const result = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+    if (result.rowCount === 0) {
+      // User not found in DB
+      req.logout?.(() => {});
+      return res.sendStatus(401);
+    }
+    next();
+  } catch (err) {
+    // DB error (e.g., DB is down)
+    return res.status(503).json({ message: "Authentication unavailable: database error" });
+  }
 };
 
 /**
@@ -55,8 +68,79 @@ const requireAdmin = async (req: Request, res: Response, next: Function) => {
  * Returns HTTP server instance for external configuration
  */
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Set up authentication routes (login, logout, register)
-  setupAuth(app);
+  // -------------------------------------------------------------------------
+  // Income Deletion Route
+  // -------------------------------------------------------------------------
+  app.delete("/api/incomes/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      console.log("[DEBUG] DELETE /api/incomes/:id called with id:", id);
+      const income = await storage.getIncomeById(id);
+      const userRole = await storage.getUserRole(req.user!.id);
+      if (!income) {
+        console.log("[DEBUG] Income not found for id:", id);
+        return res.status(404).json({ message: "Income not found" });
+      }
+      // Allow admins to delete any income, otherwise only allow users to delete their own
+      if (income.userId !== req.user!.id && userRole !== 'admin') {
+        console.log("[DEBUG] User does not have permission to delete income. userId:", req.user!.id, "income.userId:", income.userId, "userRole:", userRole);
+        return res.status(403).json({ message: "You don't have permission to delete this income" });
+      }
+      await storage.deleteIncome(id);
+      console.log("[DEBUG] Called storage.deleteIncome for id:", id);
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting income:", error);
+      res.status(500).json({ message: "Failed to delete income" });
+    }
+  });
+  // -------------------------------------------------------------------------
+  // User Income Category Routes
+  // ------------------------------------------------------------------------- 
+  // Create a user-specific income category
+  app.post("/api/user-income-categories", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const { name } = req.body;
+      if (!name || typeof name !== "string" || name.trim() === "") {
+        return res.status(400).json({ message: "Category name is required" });
+      }
+      // Prevent duplicate for this user
+      const exists = await pool.query('SELECT 1 FROM user_income_categories WHERE user_id = $1 AND LOWER(name) = LOWER($2)', [userId, name]);
+      if ((exists?.rowCount || 0) > 0) {
+        return res.status(409).json({ message: "Category already exists" });
+      }
+      const result = await pool.query(
+        'INSERT INTO user_income_categories (user_id, name) VALUES ($1, $2) RETURNING *',
+        [userId, name]
+      );
+      res.status(201).json(result.rows[0]);
+    } catch (error) {
+      console.error("Error creating user income category:", error);
+      res.status(500).json({ message: "Failed to create user income category" });
+    }
+  });
+
+  // Delete a user-specific income category
+  app.delete("/api/user-income-categories/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const userId = req.user!.id;
+      // Ensure the category belongs to the user
+      const cat = await pool.query('SELECT * FROM user_income_categories WHERE id = $1 AND user_id = $2', [id, userId]);
+      if (cat.rowCount === 0) {
+        return res.status(404).json({ message: "Category not found" });
+      }
+      await pool.query('DELETE FROM user_income_categories WHERE id = $1', [id]);
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting user income category:", error);
+      res.status(500).json({ message: "Failed to delete user income category" });
+    }
+  });
+  // Set up CORS before any routes or auth
+  app.use(cors(corsOptions));
+  // Authentication routes are set up in index.ts after body parser middleware
 
   // -------------------------------------------------------------------------
   // Expense Category Management Routes
@@ -138,7 +222,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       if (category.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to update this category" });
+        if (!category.is_system) {
+          return res.status(403).json({ message: "You don't have permission to update this category" });
+        }
       }
       
       const categoryData = insertExpenseCategorySchema.parse(req.body);
@@ -171,7 +257,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       if (category.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to delete this category" });
+        if (!category.is_system) {
+          return res.status(403).json({ message: "You don't have permission to delete this category" });
+        }
       }
       
       await storage.deleteExpenseCategory(id);
@@ -195,7 +283,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       if (category.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to access this category" });
+        if (!category.is_system) {
+          return res.status(403).json({ message: "You don't have permission to access this category" });
+        }
       }
       
       const subcategories = await storage.getExpenseSubcategories(categoryId);
@@ -213,7 +303,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Verify the category belongs to the user
       const category = await storage.getExpenseCategoryById(subcategoryData.categoryId);
       if (!category || category.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid category" });
+        if (!category || (!category.is_system && category.userId !== req.user!.id)) {
+          return res.status(403).json({ message: "Invalid category" });
+        }
       }
       
       const subcategory = await storage.createExpenseSubcategory(req.user!.id, subcategoryData);
@@ -247,7 +339,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Verify the category belongs to the user
       const category = await storage.getExpenseCategoryById(subcategoryData.categoryId);
       if (!category || category.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid category" });
+        if (!category || (!category.is_system && category.userId !== req.user!.id)) {
+          return res.status(403).json({ message: "Invalid category" });
+        }
       }
       
       const updatedSubcategory = await storage.updateExpenseSubcategory(id, subcategoryData);
@@ -291,21 +385,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/income-categories", requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
-      // Always ensure only 'Wages' and 'Other' exist for this user
-      const defaultCategories = ["Wages", "Other"];
-      // Check for each default category and insert if missing
-      for (const name of defaultCategories) {
-        const exists = await pool.query('SELECT 1 FROM income_categories WHERE user_id = $1 AND name = $2', [userId, name]);
-        if (exists.rowCount === 0) {
-          await pool.query('INSERT INTO income_categories (user_id, name) VALUES ($1, $2)', [userId, name]);
-        }
-      }
-      // Only return 'Wages' and 'Other' for this user
-      const categoriesResult = await pool.query(
-        'SELECT * FROM income_categories WHERE user_id = $1 AND (name = $2 OR name = $3) ORDER BY name',
-        [userId, "Wages", "Other"]
+      // Fetch the three default categories
+      const defaultCategoriesResult = await pool.query(
+        'SELECT id, name FROM income_categories WHERE name IN (\'Wages\', \'Other\', \'Deals\') ORDER BY name'
       );
-      res.json(categoriesResult.rows);
+      const defaultCategories = defaultCategoriesResult.rows.map(row => ({
+        id: row.id,
+        name: row.name,
+        isDefault: true
+      }));
+
+      // Fetch user-specific categories
+      const userCategoriesResult = await pool.query(
+        'SELECT * FROM income_categories WHERE user_id = $1 OR is_system = true', [userId]
+      );
+      const userCategories = userCategoriesResult.rows.map(row => ({
+        id: row.id,
+        name: row.name,
+        isDefault: false
+      }));
+
+      // Combine and return
+      res.json([...defaultCategories, ...userCategories]);
     } catch (error) {
       console.error("Error fetching income categories:", error);
       res.status(500).json({ message: "Failed to fetch income categories" });
@@ -313,8 +414,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   
   // Disable POST /api/income-categories to prevent user-created categories
+  // Enable POST /api/income-categories to allow user-created categories
   app.post("/api/income-categories", requireAuth, async (req, res) => {
-    res.status(403).json({ message: "Creating new income categories is not allowed. Only 'Wages' and 'Other' are available." });
+    try {
+      const userId = req.user!.id;
+      const { name, description = "" } = req.body;
+      if (!name || typeof name !== "string" || name.trim() === "") {
+        return res.status(400).json({ message: "Category name is required" });
+      }
+      // Prevent duplicate category names for this user
+      const exists = await pool.query('SELECT 1 FROM income_categories WHERE user_id = $1 AND LOWER(name) = LOWER($2)', [userId, name]);
+      if ((exists?.rowCount || 0) > 0) {
+        return res.status(409).json({ message: "Category already exists" });
+      }
+      const result = await pool.query(
+        'INSERT INTO income_categories (user_id, name, description) VALUES ($1, $2, $3) RETURNING *',
+        [userId, name, description]
+      );
+      const row = result.rows[0];
+      const newCategory = {
+        id: row.id,
+        userId: row.user_id,
+        name: row.name,
+        description: row.description,
+        isSystem: row.is_system,
+        createdAt: row.created_at
+      };
+      res.status(201).json(newCategory);
+    } catch (error) {
+      console.error("Error creating income category:", error);
+      res.status(500).json({ message: "Failed to create income category" });
+    }
   });
   
   app.patch("/api/income-categories/:id", requireAuth, async (req, res) => {
@@ -470,105 +600,82 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   
   // -------------------------------------------------------------------------
-// Expense Routes
-// -------------------------------------------------------------------------
-app.get("/api/expenses", requireAuth, async (req, res) => {
-  try {
-    // Fetch only this user's expenses
-    const expenses = await storage.getExpensesByUserId(req.user!.id);
-
-    // Attach category + subcategory names for readability
-    const augmentedExpenses = await Promise.all(
-      expenses.map(async (expense) => {
+  // Expense Routes
+  // -------------------------------------------------------------------------
+  app.get("/api/expenses", requireAuth, async (req, res) => {
+    try {
+      const expenses = await storage.getExpensesByUserId(req.user!.id);
+      
+      // Augment each expense with category and subcategory names
+      const augmentedExpenses = await Promise.all(expenses.map(async (expense) => {
         const category = await storage.getExpenseCategoryById(expense.categoryId);
-
+        
         let subcategory = null;
         if (expense.subcategoryId) {
           subcategory = await storage.getExpenseSubcategoryById(expense.subcategoryId);
         }
-
+        
         return {
           ...expense,
-          categoryName: category?.name || "Unknown",
-          subcategoryName: subcategory?.name || null,
+          categoryName: category?.name || 'Unknown',
+          subcategoryName: subcategory?.name || null
         };
-      })
-    );
-
-    console.log("[DEBUG] /api/expenses for userId:", req.user!.id, augmentedExpenses);
-    res.json(augmentedExpenses);
-  } catch (error) {
-    console.error("Error fetching expenses:", error);
-    res.status(500).json({ message: "Failed to fetch expenses" });
-  }
-});
-
-app.post("/api/expenses", requireAuth, async (req, res) => {
-  try {
-    const data = req.body;
-
-    // Ensure date is parsed correctly
-    if (data.date && typeof data.date === "string") {
-      data.date = new Date(data.date);
+      }));
+      
+  console.log("[DEBUG] /api/expenses for userId:", req.user!.id, "expenses:", augmentedExpenses);
+  res.json(augmentedExpenses);
+    } catch (error) {
+      console.error("Error fetching expenses:", error);
+      res.status(500).json({ message: "Failed to fetch expenses" });
     }
+  });
 
-    let expense;
+  app.post("/api/expenses", requireAuth, async (req, res) => {
+    try {
+      // Ensure date is properly parsed, especially if it came as an ISO string
+      const data = req.body;
+      if (data.date && typeof data.date === 'string') {
+        data.date = new Date(data.date);
+      }
+      
+      // Check if we're using legacy or new schema
+      let expense;
+      
+      if ('category' in data) {
+        // Legacy mode (string category)
+        const expenseData = legacyInsertExpenseSchema.parse(data);
+        expense = await storage.createLegacyExpense({
+          ...expenseData,
+          userId: req.user!.id
+        });
+      } else {
+        // New mode (category ID)
+        const expenseData = insertExpenseSchema.parse(data);
 
-    if ("category" in data) {
-      // Legacy mode (string category)
-      const expenseData = legacyInsertExpenseSchema.parse(data);
-
-      expense = await storage.createLegacyExpense({
-        ...expenseData,
-        userId: req.user!.id,
-      });
-    } else {
-      // New mode (categoryId + optional subcategoryId)
-      const expenseData = insertExpenseSchema.parse(data);
-
-      // 🔒 Ensure category belongs to the user
-      const categoryResult = await pool.query(
-        "SELECT * FROM expense_categories WHERE id = $1 AND (user_id = $2 OR is_system = true)",
-        [expenseData.categoryId, req.user!.id]
-      );
+      // Only check that the category exists
+      const categoryResult = await pool.query('SELECT * FROM expense_categories WHERE id = $1', [expenseData.categoryId]);
       const category = categoryResult.rows[0];
       if (!category) {
-        return res.status(403).json({ message: "Invalid or unauthorized category" });
+        return res.status(403).json({ message: "Invalid category" });
       }
-
-      // 🔒 Ensure subcategory belongs to the same user (if provided)
-      if (expenseData.subcategoryId) {
-        const subcategoryResult = await pool.query(
-          "SELECT * FROM expense_subcategories WHERE id = $1 AND user_id = $2",
-          [expenseData.subcategoryId, req.user!.id]
-        );
-        if (subcategoryResult.rows.length === 0) {
-          return res.status(403).json({ message: "Invalid or unauthorized subcategory" });
-        }
+        
+        expense = await storage.createExpense({
+          ...expenseData,
+          userId: req.user!.id
+        });
       }
-
-      expense = await storage.createExpense({
-        ...expenseData,
-        userId: req.user!.id,
-      });
+      
+      res.status(201).json(expense);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const validationError = fromZodError(error);
+        res.status(400).json({ message: validationError.message });
+      } else {
+        console.error("Error creating expense:", error);
+        res.status(500).json({ message: "Failed to create expense" });
+      }
     }
-
-    res.status(201).json(expense);
-  } catch (error) {
-  if (error instanceof ZodError) {
-    const validationError = fromZodError(error);
-    res.status(400).json({ message: validationError.message });
-  } else {
-    console.error("Error creating expense:", error); // <--- update this
-    res.status(500).json({ 
-      message: "Failed to create expense",
-      error: error instanceof Error ? error.message : error 
-    });
-  }
-}
-
-});
-
+  });
 
   app.get("/api/expenses/:id", requireAuth, async (req, res) => {
     try {
@@ -590,72 +697,94 @@ app.post("/api/expenses", requireAuth, async (req, res) => {
     }
   });
 
-  app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const expense = await storage.getExpenseById(id);
-      
-      if (!expense) {
-        return res.status(404).json({ message: "Expense not found" });
+ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const expense = await storage.getExpenseById(id);
+
+    if (!expense) return res.status(404).json({ message: "Expense not found" });
+
+    const userRole = await storage.getUserRole(req.user!.id);
+    if (expense.user_id !== req.user!.id && userRole !== "admin")
+      return res.status(403).json({ message: "You don't have permission to update this expense" });
+
+    const data = req.body;
+    if (data.date && typeof data.date === "string") data.date = new Date(data.date);
+
+    // Parse request body
+    const expenseData = insertExpenseSchema.parse(data);
+
+    // Define system categories
+    const systemCategories = [
+      { id: 1, name: "Wages" },
+      { id: 2, name: "Deals" },
+      { id: 3, name: "Other" },
+    ];
+
+    // Determine final category ID
+    let finalCategoryId: number | null = null;
+
+    if (expenseData.categoryId && systemCategories.some(cat => cat.id === Number(expenseData.categoryId))) {
+      // It's a system category
+      finalCategoryId = Number(expenseData.categoryId);
+    } else if (expenseData.categoryId) {
+      // It's a user-defined category, validate it exists
+      const category = await storage.getExpenseCategoryById(expenseData.categoryId);
+      if (!category || (category.user_id !== req.user!.id && !category.is_system)) {
+        return res.status(403).json({ message: "Invalid category" });
       }
-      
-      const userRole = await storage.getUserRole(req.user!.id);
-      if (expense.user_id !== req.user!.id && userRole !== "admin") {
-        return res.status(403).json({ message: "You don't have permission to update this expense" });
-      }
-      
-      // Ensure date is properly parsed, especially if it came as an ISO string
-      const data = req.body;
-      if (data.date && typeof data.date === 'string') {
-        data.date = new Date(data.date);
-      }
-      
-      // Check if we're using legacy or new schema
-      let updatedExpense;
-      
-      if ('category' in data) {
-        // Legacy mode (string category)
-        const expenseData = legacyInsertExpenseSchema.parse(data);
-        updatedExpense = await storage.updateLegacyExpense(id, {
-          ...expenseData,
-          userId: req.user!.id
-        });
-      } else {
-        // New mode (category ID)
-        const expenseData = insertExpenseSchema.parse(data);
-        
-        // Verify the category belongs to the user or user is admin
-        const categoryUserRole = await storage.getUserRole(req.user!.id);
-        const category = await storage.getExpenseCategoryById(expenseData.categoryId);
-        if (!category || (category.user_id !== req.user!.id && categoryUserRole !== "admin")) {
-          return res.status(403).json({ message: "Invalid category" });
-        }
-        
-        // If subcategory is provided, verify it belongs to the category
-        if (expenseData.subcategoryId) {
-          const subcategory = await storage.getExpenseSubcategoryById(expenseData.subcategoryId);
-          if (!subcategory || subcategory.categoryId !== expenseData.categoryId) {
-            return res.status(403).json({ message: "Invalid subcategory" });
-          }
-        }
-        
-        updatedExpense = await storage.updateExpense(id, {
-          ...expenseData,
-          userId: req.user!.id
-        });
-      }
-      
-      res.json(updatedExpense);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error updating expense:", error);
-        res.status(500).json({ message: "Failed to update expense" });
+      finalCategoryId = category.id;
+    } else {
+      return res.status(400).json({ message: "Category is required" });
+    }
+
+    // Validate subcategory
+    if (expenseData.subcategoryId) {
+      const subcategory = await storage.getExpenseSubcategoryById(expenseData.subcategoryId);
+      if (!subcategory || subcategory.categoryId !== finalCategoryId) {
+        return res.status(403).json({ message: "Invalid subcategory" });
       }
     }
-  });
+
+    // Update the expense
+    const updatedExpense = await pool.query(
+      `UPDATE expenses
+       SET amount = $1,
+           description = $2,
+           date = $3,
+           category_id = $4,
+           category_name = (SELECT name FROM expense_categories WHERE id = $4),
+           subcategory_id = $5,
+           merchant = $6,
+           notes = $7
+       WHERE id = $8
+       RETURNING *`,
+      [
+        expenseData.amount,
+        expenseData.description,
+        expenseData.date,
+        finalCategoryId,
+        expenseData.subcategoryId,
+        expenseData.merchant,
+        expenseData.notes,
+        id
+      ]
+    );
+
+    res.json(updatedExpense.rows[0]);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
+    } else {
+      console.error("Error updating expense:", error);
+      res.status(500).json({ message: "Failed to update expense" });
+    }
+  }
+});
+
+
+
 
   app.delete("/api/expenses/:id", requireAuth, async (req, res) => {
     try {
@@ -690,7 +819,19 @@ app.post("/api/expenses", requireAuth, async (req, res) => {
       
       // Augment each income with category and subcategory names
       const augmentedIncomes = await Promise.all(incomes.map(async (income) => {
-        const category = await storage.getIncomeCategoryById(income.categoryId);
+        let categoryName = '';
+        
+        if (income.categoryId) {
+          // System or user-defined category
+          const category = await storage.getIncomeCategoryById(income.categoryId);
+          categoryName = category?.name || 'Unknown';
+        } else if (income.categoryName) {
+          // Custom category (stored directly in category_name field)
+          categoryName = income.categoryName;
+        } else {
+          // Fallback
+          categoryName = 'Uncategorized';
+        }
         
         let subcategory = null;
         if (income.subcategoryId) {
@@ -699,7 +840,7 @@ app.post("/api/expenses", requireAuth, async (req, res) => {
         
         return {
           ...income,
-          categoryName: income.categoryName || category?.name || 'Uncategorised',
+          categoryName: categoryName,
           subcategoryName: subcategory?.name || null
         };
       }));
@@ -713,154 +854,186 @@ app.post("/api/expenses", requireAuth, async (req, res) => {
   });
 
   app.post("/api/incomes", requireAuth, async (req, res) => {
-    try {
-      // Debug log for troubleshooting category issues
-      console.log('[DEBUG] POST /api/incomes - request body:', req.body);
-      // Ensure date is properly parsed, especially if it came as an ISO string
-      const data = req.body;
-      if (data.date && typeof data.date === 'string') {
-        data.date = new Date(data.date);
-      }
-      const incomeData = insertIncomeSchema.parse(data);
-      console.log('[DEBUG] POST /api/incomes', {
-        incomingCategoryId: incomeData.categoryId,
-        userId: req.user!.id
-      });
-      const category = await storage.getIncomeCategoryById(incomeData.categoryId);
-      console.log('[DEBUG] Found category:', category);
-      if (!category || category.userId !== req.user!.id) {
-        console.log('[DEBUG] Invalid category check failed', { category, reqUserId: req.user!.id });
-        return res.status(403).json({ message: "Invalid category" });
-      }
+  console.log('[DEBUG] POST /api/incomes received body:', req.body);
 
-      // If subcategory is provided, verify it belongs to the category
-      if (incomeData.subcategoryId) {
-        const subcategory = await storage.getIncomeSubcategoryById(incomeData.subcategoryId);
-        if (!subcategory || subcategory.categoryId !== incomeData.categoryId) {
-          return res.status(403).json({ message: "Invalid subcategory" });
-        }
-      }
-
-      const income = await storage.createIncome({
-        ...incomeData,
-        userId: req.user!.id
-      });
-      res.status(201).json(income);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error creating income:", error);
-        res.status(500).json({ message: "Failed to create income" });
-      }
-    }
-  });
-
-  app.patch("/api/incomes/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const income = await storage.getIncomeById(id);
-      
-      if (!income) {
-        return res.status(404).json({ message: "Income not found" });
-      }
-      
-     if ((income.userId ?? (income as any).user_id) !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to update this income" });
-     }
-
-      
-      // Ensure date is properly parsed, especially if it came as an ISO string
-      const data = req.body;
-      if (data.date && typeof data.date === 'string') {
-        data.date = new Date(data.date);
-      }
-      
-      const incomeData = insertIncomeSchema.parse(data);
-      
-      // Verify the category belongs to the user
-      const category = await storage.getIncomeCategoryById(incomeData.categoryId);
-  if (!category || category.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid category" });
-      }
-      
-      // If subcategory is provided, verify it belongs to the category
-      if (incomeData.subcategoryId) {
-        const subcategory = await storage.getIncomeSubcategoryById(incomeData.subcategoryId);
-        if (!subcategory || subcategory.categoryId !== incomeData.categoryId) {
-          return res.status(403).json({ message: "Invalid subcategory" });
-        }
-      }
-      
-      const updatedIncome = await storage.updateIncome(id, {
-        ...incomeData,
-        userId: req.user!.id
-      });
-      
-      res.json(updatedIncome);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error updating income:", error);
-        res.status(500).json({ message: "Failed to update income" });
-      }
-    }
-  });
-
-  app.delete("/api/incomes/:id", requireAuth, async (req, res) => {
-    console.log('[DEBUG] DELETE /api/incomes/:id called with:', {
-      id: req.params.id,
-      reqUser: req.user
-    });
   try {
-    const id = parseInt(req.params.id, 10);
+    const data = req.body;
+    const userId = req.user!.id;
 
-    // 👇 Add this log here
-    console.log("Deleting income with:", { id, userId: req.user!.id });
-
-    const deletedIncome = await storage.deleteIncome(id, req.user!.id);
-
-    if (!deletedIncome) {
-      return res.status(404).json({ error: "No income to delete" });
+    // Ensure date is a Date object
+    if (data.date && typeof data.date === 'string') {
+      data.date = new Date(data.date);
     }
 
-    res.json(deletedIncome);
-  } catch (err) {
-    console.error("Error deleting income:", err);
-    res.status(500).json({ error: "Failed to delete income" });
+    let categoryName = data.categoryName?.trim();
+    if (!categoryName) {
+      return res.status(400).json({ message: "Please provide a category name." });
+    }
+
+    // Define system categories (IDs are placeholders; real IDs should exist in DB)
+    const systemCategories = [
+      { name: 'Wages' },
+      { name: 'Deals' },
+      { name: 'Other' }
+    ];
+
+    // Check if category exists in DB for this user
+    let categoryCheck = await pool.query(
+      'SELECT id, name FROM income_categories WHERE user_id = $1 AND name = $2',
+      [userId, categoryName]
+    );
+
+    let finalCategoryId: number;
+    let finalCategoryName: string;
+
+    if (categoryCheck.rows.length > 0) {
+      // Category exists
+      finalCategoryId = categoryCheck.rows[0].id;
+      finalCategoryName = categoryCheck.rows[0].name;
+    } else {
+      // If not, insert new category (system or custom)
+      const isSystem = systemCategories.some(
+        cat => cat.name.toLowerCase() === categoryName.toLowerCase()
+      );
+
+      const newCat = await pool.query(
+        'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, $4) RETURNING id, name',
+        [userId, categoryName, isSystem ? `System category: ${categoryName}` : null, isSystem]
+      );
+
+      finalCategoryId = newCat.rows[0].id;
+      finalCategoryName = newCat.rows[0].name;
+    }
+
+    // Insert the income
+    const result = await pool.query(
+      `INSERT INTO incomes
+       (user_id, amount, description, date, category_id, category_name, source, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        userId,
+        data.amount,
+        data.description,
+        data.date,
+        finalCategoryId,
+        finalCategoryName,
+        data.source,
+        data.notes
+      ]
+    );
+
+    console.log('[DEBUG] Inserted income result:', result.rows[0]);
+    res.status(201).json(result.rows[0]);
+
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
+    } else {
+      console.error("Error creating income:", error);
+      res.status(500).json({ message: "Failed to create income" });
+    }
   }
 });
 
 
+  app.patch("/api/incomes/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const income = await storage.getIncomeById(id);
 
-  
-  // -------------------------------------------------------------------------
+    if (!income) return res.status(404).json({ message: "Income not found" });
+    if (income.userId !== req.user!.id) return res.status(403).json({ message: "You don't have permission" });
+
+    const data = req.body;
+    if (data.date && typeof data.date === "string") data.date = new Date(data.date);
+
+    const incomeData = insertIncomeSchema.parse(data);
+    const userId = req.user!.id;
+
+    const categoryName = req.body.categoryName?.trim();
+    if (!categoryName) return res.status(400).json({ message: "Category name required" });
+
+    // Check if category exists for this user
+    let categoryCheck = await pool.query(
+      'SELECT id, name FROM income_categories WHERE user_id = $1 AND name = $2',
+      [userId, categoryName]
+    );
+
+    let finalCategoryId: number;
+    let finalCategoryName: string;
+
+    if (categoryCheck.rows.length > 0) {
+      finalCategoryId = categoryCheck.rows[0].id;
+      finalCategoryName = categoryCheck.rows[0].name;
+    } else {
+      // Insert new category
+      const newCat = await pool.query(
+        'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, false) RETURNING id, name',
+        [userId, categoryName, null]
+      );
+      finalCategoryId = newCat.rows[0].id;
+      finalCategoryName = newCat.rows[0].name;
+    }
+
+    // Optional: verify subcategory
+    if (incomeData.subcategoryId) {
+      const subcategory = await storage.getIncomeSubcategoryById(incomeData.subcategoryId);
+      if (!subcategory || subcategory.categoryId !== finalCategoryId) {
+        return res.status(403).json({ message: "Invalid subcategory" });
+      }
+    }
+
+    // Update income
+    const result = await pool.query(
+      `UPDATE incomes
+       SET amount=$1, description=$2, date=$3, category_id=$4, category_name=$5, subcategory_id=$6, source=$7, notes=$8
+       WHERE id=$9 AND user_id=$10
+       RETURNING *`,
+      [
+        incomeData.amount,
+        incomeData.description,
+        incomeData.date,
+        finalCategoryId,
+        finalCategoryName,
+        incomeData.subcategoryId,
+        incomeData.source,
+        incomeData.notes,
+        id,
+        userId
+      ]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ message: "Income not found" });
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error("Error updating income:", error);
+    res.status(500).json({ message: "Failed to update income" });
+  }
+});
+
+
   // Budget Routes
-  // -------------------------------------------------------------------------
   app.get("/api/budgets", requireAuth, async (req, res) => {
     try {
       const budgets = await storage.getBudgetsByUserId(req.user!.id);
-      // For each budget, get its allocations and map category IDs to names
-      const categories = await storage.getExpenseCategories(req.user!.id);
-      const categoryMap = new Map(categories.map(cat => [cat.id, cat.name]));
-      const budgetsWithCategories = await Promise.all(
+      
+      // Add performance data to each budget
+      const budgetsWithPerformance = await Promise.all(
         budgets.map(async (budget) => {
-          const allocations = await storage.getBudgetAllocations(budget.id);
-          const categoryNames = allocations
-            .map(a => categoryMap.get(a.categoryId))
-            .filter(Boolean);
+          const performance = await storage.getBudgetPerformance(budget.id);
           return {
             ...budget,
-            categoryNames,
-            categoryCount: categoryNames.length
+            allocatedAmount: performance.allocated,
+            spentAmount: performance.spent,
+            remainingAmount: performance.remaining
           };
         })
       );
-  console.log("[DEBUG] /api/budgets for userId:", req.user!.id, "budgets:", budgetsWithCategories);
-  res.json(budgetsWithCategories);
+      
+      res.json(budgetsWithPerformance);
     } catch (error) {
       console.error("Error fetching budgets:", error);
       res.status(500).json({ message: "Failed to fetch budgets" });
@@ -949,8 +1122,80 @@ app.post("/api/expenses", requireAuth, async (req, res) => {
     }
   });
 
-  
-  
+  app.patch("/api/budgets/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const budget = await storage.getBudgetById(id);
+      
+      if (!budget) {
+        return res.status(404).json({ message: "Budget not found" });
+      }
+      
+      if (budget.userId !== req.user!.id) {
+        return res.status(403).json({ message: "You don't have permission to update this budget" });
+      }
+      
+      // Ensure dates are properly parsed, especially if they came as ISO strings
+      const data = req.body;
+      if (data.startDate && typeof data.startDate === 'string') {
+        data.startDate = new Date(data.startDate);
+      }
+      if (data.endDate && typeof data.endDate === 'string') {
+        data.endDate = new Date(data.endDate);
+      }
+      
+      const budgetData = insertBudgetSchema.parse(data);
+      const updatedBudget = await storage.updateBudget(id, budgetData);
+      
+      res.json(updatedBudget);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const validationError = fromZodError(error);
+        res.status(400).json({ message: validationError.message });
+      } else {
+        console.error("Error updating budget:", error);
+        res.status(500).json({ message: "Failed to update budget" });
+      }
+    }
+  });
+
+  // PUT route for budget updates (same as PATCH)
+  app.put("/api/budgets/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const budget = await storage.getBudgetById(id);
+      
+      if (!budget) {
+        return res.status(404).json({ message: "Budget not found" });
+      }
+      
+      if (budget.userId !== req.user!.id) {
+        return res.status(403).json({ message: "You don't have permission to update this budget" });
+      }
+      
+      // Ensure dates are properly parsed, especially if they came as ISO strings
+      const data = req.body;
+      if (data.startDate && typeof data.startDate === 'string') {
+        data.startDate = new Date(data.startDate);
+      }
+      if (data.endDate && typeof data.endDate === 'string') {
+        data.endDate = new Date(data.endDate);
+      }
+      
+      const budgetData = insertBudgetSchema.parse(data);
+      const updatedBudget = await storage.updateBudget(id, budgetData);
+      
+      res.json(updatedBudget);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const validationError = fromZodError(error);
+        res.status(400).json({ message: validationError.message });
+      } else {
+        console.error("Error updating budget:", error);
+        res.status(500).json({ message: "Failed to update budget" });
+      }
+    }
+  });
 
   app.delete("/api/budgets/:id", requireAuth, async (req, res) => {
     try {
@@ -965,7 +1210,7 @@ app.post("/api/expenses", requireAuth, async (req, res) => {
         return res.status(403).json({ message: "You don't have permission to delete this budget" });
       }
       
-      await storage.deleteBudget(id, req.user!.id);
+      await storage.deleteBudget(id);
       res.status(204).send();
     } catch (error) {
       console.error("Error deleting budget:", error);
@@ -1015,6 +1260,36 @@ app.post("/api/expenses", requireAuth, async (req, res) => {
     } catch (error) {
       console.error("Error fetching budget performance:", error);
       res.status(500).json({ message: "Failed to fetch budget performance" });
+    }
+  });
+
+  // POST route for budget allocations (nested under budget)
+  app.post("/api/budgets/:budgetId/allocations", requireAuth, async (req, res) => {
+    try {
+      const budgetId = parseInt(req.params.budgetId);
+      const allocationData = insertBudgetAllocationSchema.parse(req.body);
+      
+      // Verify the budget belongs to the user
+      const budget = await storage.getBudgetById(budgetId);
+      if (!budget || budget.userId !== req.user!.id) {
+        return res.status(403).json({ message: "Invalid budget" });
+      }
+
+      // Ensure the budgetId matches
+      const finalAllocationData = {
+        ...allocationData,
+        budgetId: budgetId
+      };
+
+      const allocation = await storage.createBudgetAllocation(finalAllocationData);
+      res.status(201).json(allocation);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid data", errors: error.errors });
+      } else {
+        console.error("Error creating budget allocation:", error);
+        res.status(500).json({ message: "Failed to create budget allocation" });
+      }
     }
   });
 

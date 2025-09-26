@@ -1,3 +1,4 @@
+// Setup authentication and session middleware before routes
 // Import Express framework and TypeScript types
 import express, { type Request, Response, NextFunction } from "express";
 // Import our custom API routes
@@ -16,6 +17,10 @@ const app = express();
 app.use(express.json());
 // Middleware to parse URL-encoded form data
 app.use(express.urlencoded({ extended: false }));
+
+// Setup authentication and session middleware before routes
+import { setupAuth } from "./auth";
+setupAuth(app);
 
 /**
  * Request Logging Middleware
@@ -98,15 +103,15 @@ app.use((req, res, next) => {
 
   /**
    * Server Startup
-   * Starts the HTTP server on port 5001
+   * Starts the HTTP server on port 5000
    * - Serves both API and client on the same port
-   * - Uses 127.0.0.1 to accept connections from any IP
+   * - Uses 0.0.0.0 to accept connections from any IP
    * - Enables port reuse for development restarts
    */
   const port = 5001;
   server.listen({
     port,
-    host: "127.0.0.1",
+    host: "0.0.0.0",
   }, () => {
     log(`serving on port ${port}`);
     runMigrationScript();

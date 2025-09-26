@@ -44,12 +44,17 @@ export default function IncomePage() {
   if (incomes && categoryData) {
     const newEnrichedIncomes = incomes.map(income => {
       const category = categoryData.find(c => String(c.id) === String(income.categoryId));
-      if (!category) {
-        console.warn('No matching category for income:', income, 'in categories:', categoryData);
+      let categoryLabel = '';
+      if (category) {
+        categoryLabel = category.name;
+      } else if (income.categoryName) {
+        categoryLabel = income.categoryName;
+      } else {
+        categoryLabel = 'Uncategorized';
       }
       return {
         ...income,
-        category: category?.name || 'Uncategorized'
+        category: categoryLabel
       };
     });
     setEnrichedIncomes(newEnrichedIncomes);
@@ -156,7 +161,7 @@ export default function IncomePage() {
                         {date.toLocaleDateString()}
                       </td>
                       <td className="py-3 px-4">{income.description}</td>
-                      <td className="py-3 px-4">{income.categoryName || "Uncategorised"}</td>
+                      <td className="py-3 px-4">{income.category}</td>
                       <td className="py-3 px-4">{income.source || "-"}</td>
                       <td className="py-3 px-4 text-right font-medium">
                         {new Intl.NumberFormat('en-US', { 

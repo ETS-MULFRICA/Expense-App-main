@@ -12,13 +12,14 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
+  console.log("Before fetch", { method, url, data });
   const res = await fetch(url, {
     method,
     headers: data ? { "Content-Type": "application/json" } : {},
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
-
+  console.log("After fetch", res);
   await throwIfResNotOk(res);
   return res;
 }
