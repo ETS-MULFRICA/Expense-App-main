@@ -163,18 +163,6 @@ export const insertExpenseSchema = createInsertSchema(expenses)
     notes: true,
   });
 
-export const updateExpenseSchema = z.object({
-  date: z.date(),
-  amount: z.number(),
-  description: z.string(),
-  categoryId: z.number(),
-  categoryName: z.string().optional(), // <-- add this
-  subcategoryId: z.number().optional(),
-  merchant: z.string().optional(),
-  notes: z.string().optional(),
-});
-
-export type UpdateExpense = z.infer<typeof updateExpenseSchema>;
 
 // Income schema
 export const insertIncomeSchema = createInsertSchema(incomes)

@@ -697,92 +697,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
- app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
+app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const expense = await storage.getExpenseById(id);
 
-    if (!expense) return res.status(404).json({ message: "Expense not found" });
+    if (!expense) {
+      return res.status(404).json({ message: "Expense not found" });
+    }
 
     const userRole = await storage.getUserRole(req.user!.id);
-    if (expense.user_id !== req.user!.id && userRole !== "admin")
+    if (expense.user_id !== req.user!.id && userRole !== "admin") {
       return res.status(403).json({ message: "You don't have permission to update this expense" });
-
-    const data = req.body;
-    if (data.date && typeof data.date === "string") data.date = new Date(data.date);
-
-    // Parse request body
-    const expenseData = insertExpenseSchema.parse(data);
-
-    // Define system categories
-    const systemCategories = [
-      { id: 1, name: "Wages" },
-      { id: 2, name: "Deals" },
-      { id: 3, name: "Other" },
-    ];
-
-    // Determine final category ID
-    let finalCategoryId: number | null = null;
-
-    if (expenseData.categoryId && systemCategories.some(cat => cat.id === Number(expenseData.categoryId))) {
-      // It's a system category
-      finalCategoryId = Number(expenseData.categoryId);
-    } else if (expenseData.categoryId) {
-      // It's a user-defined category, validate it exists
-      const category = await storage.getExpenseCategoryById(expenseData.categoryId);
-      if (!category || (category.user_id !== req.user!.id && !category.is_system)) {
-        return res.status(403).json({ message: "Invalid category" });
-      }
-      finalCategoryId = category.id;
-    } else {
-      return res.status(400).json({ message: "Category is required" });
     }
 
-    // Validate subcategory
-    if (expenseData.subcategoryId) {
-      const subcategory = await storage.getExpenseSubcategoryById(expenseData.subcategoryId);
-      if (!subcategory || subcategory.categoryId !== finalCategoryId) {
-        return res.status(403).json({ message: "Invalid subcategory" });
-      }
+    // Map frontend category IDs (1–5) to real database IDs (11–15)
+    const categoryMap: Record<number, number> = {
+      1: 11, // Food
+      2: 12, // Transport
+      3: 13, // Utilities
+      4: 14, // Health
+      5: 15  // Entertainment
+    };
+
+    let { categoryId, categoryName, amount, description, date, merchant, notes } = req.body;
+
+    // Convert categoryId if necessary
+    if (categoryId && categoryMap[categoryId]) {
+      categoryId = categoryMap[categoryId];
     }
 
-    // Update the expense
-    const updatedExpense = await pool.query(
-      `UPDATE expenses
-       SET amount = $1,
-           description = $2,
-           date = $3,
-           category_id = $4,
-           category_name = (SELECT name FROM expense_categories WHERE id = $4),
-           subcategory_id = $5,
-           merchant = $6,
-           notes = $7
-       WHERE id = $8
-       RETURNING *`,
-      [
-        expenseData.amount,
-        expenseData.description,
-        expenseData.date,
-        finalCategoryId,
-        expenseData.subcategoryId,
-        expenseData.merchant,
-        expenseData.notes,
-        id
-      ]
+    // Ensure date is parsed properly
+    if (date && typeof date === "string") {
+      date = new Date(date);
+    }
+
+    // Update the expense in the database
+    const result = await pool.query(
+      `UPDATE expenses 
+       SET amount = $1, description = $2, date = $3, merchant = $4, notes = $5, category_id = $6, category_name = $7, updated_at = NOW() 
+       WHERE id = $8 RETURNING *`,
+      [amount, description, date, merchant, notes, categoryId, categoryName, id]
     );
 
-    res.json(updatedExpense.rows[0]);
+    res.json(result.rows[0]);
   } catch (error) {
-    if (error instanceof ZodError) {
-      const validationError = fromZodError(error);
-      res.status(400).json({ message: validationError.message });
-    } else {
-      console.error("Error updating expense:", error);
-      res.status(500).json({ message: "Failed to update expense" });
-    }
+    console.error("Error updating expense:", error);
+    res.status(500).json({ message: "Failed to update expense" });
   }
 });
-
 
 
 

@@ -1,5 +1,5 @@
 import React from "react";
-import { Dialog, DialogContent, DialogTitle, DialogActions } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 
 interface DeleteBudgetDialogProps {
@@ -14,10 +14,10 @@ export const DeleteBudgetDialog: React.FC<DeleteBudgetDialogProps> = ({ isOpen, 
       <DialogContent>
         <DialogTitle>Delete Budget</DialogTitle>
         <p>Are you sure you want to delete this budget?</p>
-        <DialogActions>
+        <DialogFooter>
           <Button variant="destructive" onClick={onDelete}>Delete</Button>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-        </DialogActions>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

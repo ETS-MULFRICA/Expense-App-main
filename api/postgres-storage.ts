@@ -444,6 +444,7 @@ export class PostgresStorage {
       'INSERT INTO expenses (user_id, amount, description, date, category_id, category_name, subcategory_id, merchant, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
       [expense.userId, expense.amount, expense.description, expense.date, expense.categoryId, categoryName, expense.subcategoryId, expense.merchant, expense.notes]
     );
+    
     return result.rows[0];
   }
 
