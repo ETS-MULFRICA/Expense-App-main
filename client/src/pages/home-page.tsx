@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Expense } from "@shared/schema";
 import StatCards from "@/components/dashboard/stat-cards";
@@ -16,36 +16,68 @@ export default function HomePage() {
     queryKey: ["/api/expenses"],
   });
 
-  const currentMonth = new Date().getMonth();
+  // Debug logging
+  useEffect(() => {
+    if (expenses) {
+      console.log("All expenses with categories:", expenses);
+      
+      // Calculate category totals for debugging
+      const categoryTotals: Record<string, number> = {};
+      expenses.forEach(expense => {
+        // Use the category_name that comes from the backend
+        const categoryName = expense.category_name || "Uncategorized";
+        categoryTotals[categoryName] = (categoryTotals[categoryName] || 0) + expense.amount;
+      });
+      console.log("Category totals:", categoryTotals);
+    }
+  }, [expenses]);
+
+  // Date filtering logic
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+
   const monthExpenses = expenses?.filter(expense => {
     const expenseDate = new Date(expense.date);
-    return expenseDate.getMonth() === currentMonth;
-  });
+    return expenseDate.getFullYear() === currentYear && 
+           expenseDate.getMonth() === currentMonth;
+  }) || [];
 
   const lastMonthExpenses = expenses?.filter(expense => {
     const expenseDate = new Date(expense.date);
-    return expenseDate.getMonth() === currentMonth - 1;
-  });
+    const expenseYear = expenseDate.getFullYear();
+    const expenseMonth = expenseDate.getMonth();
+    
+    if (currentMonth === 0) {
+      return expenseYear === currentYear - 1 && expenseMonth === 11;
+    } else {
+      return expenseYear === currentYear && expenseMonth === currentMonth - 1;
+    }
+  }) || [];
 
-  const totalCurrentMonth = monthExpenses?.reduce((sum, expense) => sum + expense.amount, 0) || 0;
-  const totalLastMonth = lastMonthExpenses?.reduce((sum, expense) => sum + expense.amount, 0) || 0;
+  const totalCurrentMonth = monthExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const totalLastMonth = lastMonthExpenses.reduce((sum, expense) => sum + expense.amount, 0);
   
   const percentChange = totalLastMonth === 0 
-    ? 0 
+    ? totalCurrentMonth > 0 ? 100 : 0
     : ((totalCurrentMonth - totalLastMonth) / totalLastMonth) * 100;
 
-  // Get highest category by sum
+  // FIXED: Use the category_name that already comes from the backend
   const categoryTotals: Record<string, number> = {};
   
   expenses?.forEach(expense => {
-  // Get category by ID from the backend or use 'Uncategorized' if missing
-  const categoryKey = expense.categoryId ? expense.categoryId.toString() : "Uncategorized";
-  categoryTotals[categoryKey] = (categoryTotals[categoryKey] || 0) + expense.amount;
+    // Use the category_name field that's already populated by your backend
+    const categoryName = expense.category_name || "Uncategorized";
+    categoryTotals[categoryName] = (categoryTotals[categoryName] || 0) + expense.amount;
   });
+
+  console.log("Final category totals:", categoryTotals);
 
   const highestCategory = Object.entries(categoryTotals).length > 0
     ? Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0][0]
     : "None";
+
+  console.log("Highest category result:", highestCategory);
 
   const recentExpensesCount = expenses?.length || 0;
 

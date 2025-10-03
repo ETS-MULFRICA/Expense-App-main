@@ -170,6 +170,16 @@ export default function RecentExpenses({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/expenses"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/expenses"] });
+      // Invalidate ALL budget-related queries since deleted expense may have been assigned to a budget
+      queryClient.invalidateQueries({ 
+        predicate: (query) => {
+          const queryKey = query.queryKey;
+          return Array.isArray(queryKey) && 
+                 queryKey.length > 0 && 
+                 typeof queryKey[0] === "string" && 
+                 queryKey[0].startsWith("/api/budgets");
+        }
+      });
       toast({
         title: "Expense deleted",
         description: "The expense has been deleted successfully.",

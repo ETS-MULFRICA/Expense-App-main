@@ -107,6 +107,21 @@ CREATE TABLE IF NOT EXISTS budget_allocations (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Create activity_log table for tracking user actions
+CREATE TABLE IF NOT EXISTS activity_log (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    action_type VARCHAR(50) NOT NULL,
+    resource_type VARCHAR(50) NOT NULL,
+    resource_id INTEGER,
+    description TEXT NOT NULL,
+    ip_address INET,
+    user_agent TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+
 -- Indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_expenses_user_id ON expenses(user_id);
 CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);
@@ -114,6 +129,11 @@ CREATE INDEX IF NOT EXISTS idx_expenses_category_id ON expenses(category_id);
 CREATE INDEX IF NOT EXISTS idx_incomes_user_id ON incomes(user_id);
 CREATE INDEX IF NOT EXISTS idx_incomes_date ON incomes(date);
 CREATE INDEX IF NOT EXISTS idx_budgets_user_id ON budgets(user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_log_user_id ON activity_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_log_created_at ON activity_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_activity_log_action_type ON activity_log(action_type);
+CREATE INDEX IF NOT EXISTS idx_activity_log_resource_type ON activity_log(resource_type);
+
 
 -- Insert default demo user (optional)
 -- Password is 'password' hashed with bcrypt

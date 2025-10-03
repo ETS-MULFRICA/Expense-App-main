@@ -10,7 +10,8 @@ import {
   PieChart,
   ShieldAlert,
   CreditCard,
-  TrendingUp
+  TrendingUp,
+  Clock
 } from "lucide-react";
 
 export default function Sidebar() {
@@ -24,6 +25,7 @@ export default function Sidebar() {
     { name: "Income", href: "/income", icon: TrendingUp },
     { name: "Budgets", href: "/budgets", icon: PieChart },
     { name: "Reports", href: "/reports", icon: BarChart2 },
+    { name: "History", href: "/history", icon: Clock },
     { name: "Settings", href: "/settings", icon: Settings },
   ];
   

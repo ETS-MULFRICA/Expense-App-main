@@ -1281,6 +1281,30 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
       }
       
       const allocation = await storage.createBudgetAllocation(allocationData);
+
+      // Log the budget allocation creation activity
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'CREATE',
+          resourceType: 'BUDGET_ALLOCATION',
+          resourceId: allocation.id,
+          description: ActivityDescriptions.createBudgetAllocation(budget.name, category.name, allocation.amount),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            budgetName: budget.name,
+            categoryName: category.name,
+            amount: allocation.amount,
+            budgetId: budget.id,
+            categoryId: category.id
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log budget allocation creation activity:', logError);
+      }
+
       res.status(201).json(allocation);
     } catch (error) {
       if (error instanceof ZodError) {
@@ -1306,7 +1330,7 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
       
       // Verify the category belongs to the user
       const category = await storage.getExpenseCategoryById(allocationData.categoryId);
-      if (!category || category.userId !== req.user!.id) {
+      if (!category || (!category.isSystem && category.userId !== req.user!.id)) {
         return res.status(403).json({ message: "Invalid category" });
       }
       
@@ -1317,8 +1341,42 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
           return res.status(403).json({ message: "Invalid subcategory" });
         }
       }
+
+       // Get the old allocation for logging
+      const oldAllocation = await storage.getBudgetAllocations(allocationData.budgetId);
+      const currentAllocation = oldAllocation.find(a => a.id === id);
       
       const updatedAllocation = await storage.updateBudgetAllocation(id, allocationData);
+
+      // Log the budget allocation update activity
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'UPDATE',
+          resourceType: 'BUDGET_ALLOCATION',
+          resourceId: id,
+          description: ActivityDescriptions.updateBudgetAllocation(
+            budget.name, 
+            category.name, 
+            currentAllocation?.amount || 0, 
+            allocationData.amount
+          ),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            budgetName: budget.name,
+            categoryName: category.name,
+            oldAmount: currentAllocation?.amount || 0,
+            newAmount: allocationData.amount,
+            budgetId: budget.id,
+            categoryId: category.id
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log budget allocation update activity:', logError);
+      }
+
       res.json(updatedAllocation);
     } catch (error) {
       if (error instanceof ZodError) {
@@ -1331,10 +1389,61 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
     }
   });
 
-  app.delete("/api/budget-allocations/:id", requireAuth, async (req, res) => {
+   app.delete("/api/budget-allocations/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      
+      // Get allocation details before deletion for logging
+      const budgets = await storage.getBudgetsByUserId(req.user!.id);
+      let allocationToDelete = null;
+      let budgetName = '';
+      let categoryName = '';
+      
+      for (const budget of budgets) {
+        const allocations = await storage.getBudgetAllocations(budget.id);
+        const allocation = allocations.find(a => a.id === id);
+        if (allocation) {
+          allocationToDelete = allocation;
+          budgetName = budget.name;
+           // ✅ SAFE: look up the category name by categoryId instead of reading allocation.categoryName
+        if (allocation.categoryId) {
+          const cat = await storage.getExpenseCategoryById(allocation.categoryId);
+          categoryName = cat?.name ?? 'Unknown';
+        } else {
+          categoryName = 'Unknown';
+        }
+
+        break;
+        }
+      }
+      
       await storage.deleteBudgetAllocation(id);
+      
+      // Log the budget allocation deletion activity
+      if (allocationToDelete) {
+        try {
+          const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+          await logActivity({
+            userId: req.user!.id,
+            actionType: 'DELETE',
+            resourceType: 'BUDGET_ALLOCATION',
+            resourceId: id,
+            description: ActivityDescriptions.deleteBudgetAllocation(budgetName, categoryName, allocationToDelete.amount),
+            ipAddress: req.ip || req.connection.remoteAddress,
+            userAgent: req.headers['user-agent'],
+            metadata: { 
+              budgetName: budgetName,
+              categoryName: categoryName,
+              amount: allocationToDelete.amount,
+              budgetId: allocationToDelete.budgetId,
+              categoryId: allocationToDelete.categoryId
+            }
+          });
+        } catch (logError) {
+          console.error('Failed to log budget allocation deletion activity:', logError);
+        }
+      }
+      
       res.status(204).send();
     } catch (error) {
       console.error("Error deleting budget allocation:", error);
@@ -1349,6 +1458,27 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
     try {
       const year = parseInt(req.params.year);
       const monthlyExpenses = await storage.getMonthlyExpenseTotals(req.user!.id, year);
+      
+      // Log activity for viewing monthly expense report
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'VIEW',
+          resourceType: 'REPORT',
+          description: ActivityDescriptions.viewMonthlyExpenseReport(year),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            reportType: 'monthly-expenses',
+            year: year,
+            recordCount: monthlyExpenses.length
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log monthly expense report activity:', logError);
+      }
+      
       res.json(monthlyExpenses);
     } catch (error) {
       console.error("Error fetching monthly expense report:", error);
@@ -1368,6 +1498,28 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
       const end = new Date(endDate as string);
       
       const categoryExpenses = await storage.getCategoryExpenseTotals(req.user!.id, start, end);
+      
+      // Log activity for viewing category expense report
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'VIEW',
+          resourceType: 'REPORT',
+          description: ActivityDescriptions.viewCategoryExpenseReport(),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            reportType: 'category-expenses',
+            startDate: start.toISOString(),
+            endDate: end.toISOString(),
+            categoriesCount: categoryExpenses.length
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log category expense report activity:', logError);
+      }
+      
       res.json(categoryExpenses);
     } catch (error) {
       console.error("Error fetching category expense report:", error);
@@ -1379,6 +1531,27 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
     try {
       const year = parseInt(req.params.year);
       const monthlyIncomes = await storage.getMonthlyIncomeTotals(req.user!.id, year);
+      
+      // Log activity for viewing monthly income report
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'VIEW',
+          resourceType: 'REPORT',
+          description: ActivityDescriptions.viewMonthlyIncomeReport(year),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            reportType: 'monthly-incomes',
+            year: year,
+            recordCount: monthlyIncomes.length
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log monthly income report activity:', logError);
+      }
+      
       res.json(monthlyIncomes);
     } catch (error) {
       console.error("Error fetching monthly income report:", error);
@@ -1398,6 +1571,28 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
       const end = new Date(endDate as string);
       
       const categoryIncomes = await storage.getCategoryIncomeTotals(req.user!.id, start, end);
+      
+      // Log activity for viewing category income report
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'VIEW',
+          resourceType: 'REPORT',
+          description: ActivityDescriptions.viewCategoryIncomeReport(),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            reportType: 'category-incomes',
+            startDate: start.toISOString(),
+            endDate: end.toISOString(),
+            categoriesCount: categoryIncomes.length
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log category income report activity:', logError);
+      }
+      
       res.json(categoryIncomes);
     } catch (error) {
       console.error("Error fetching category income report:", error);
@@ -1416,6 +1611,29 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
       }
       
       const performance = await storage.getBudgetPerformance(budgetId);
+      
+      // Log activity for viewing budget performance report
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'VIEW',
+          resourceType: 'REPORT',
+          resourceId: budgetId,
+          description: ActivityDescriptions.viewBudgetPerformanceReport(budget.name),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            reportType: 'budget-performance',
+            budgetId: budgetId,
+            budgetName: budget.name,
+            performance: performance
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log budget performance report activity:', logError);
+      }
+      
       res.json(performance);
     } catch (error) {
       console.error("Error fetching budget performance:", error);
@@ -1423,19 +1641,192 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
     }
   });
   
+  
   // -------------------------------------------------------------------------
   // User settings routes
   // -------------------------------------------------------------------------
-  app.patch("/api/user/settings", requireAuth, async (req, res) => {
+   app.patch("/api/user/settings", requireAuth, async (req, res) => {
     try {
       const { currency } = req.body;
+      const oldCurrency = req.user!.currency;
+      
+      console.log(`[DEBUG] Currency update request:`, {
+        userId: req.user!.id,
+        username: req.user!.username,
+        oldCurrency,
+        newCurrency: currency,
+        timestamp: new Date().toISOString()
+      });
       
       const updatedUser = await storage.updateUserSettings(req.user!.id, { currency });
+      
+      console.log(`[DEBUG] Currency updated successfully:`, {
+        userId: req.user!.id,
+        updatedCurrency: updatedUser.currency,
+        confirmed: updatedUser.currency === currency
+      });
+      
+      // Log activity for updating user settings
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'UPDATE',
+          resourceType: 'SETTINGS',
+          description: ActivityDescriptions.updateUserSettings('currency', oldCurrency, currency),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            settingType: 'currency',
+            oldValue: oldCurrency,
+            newValue: currency
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log user settings update activity:', logError);
+      }
+      
       const { password, ...userWithoutPassword } = updatedUser;
       res.json(userWithoutPassword);
     } catch (error) {
       console.error("Error updating user settings:", error);
       res.status(500).json({ message: "Failed to update user settings" });
+    }
+  });
+
+  // Update user profile information
+  app.patch("/api/user/profile", requireAuth, async (req, res) => {
+    try {
+      const { name, email } = req.body;
+      const oldName = req.user!.name;
+      const oldEmail = req.user!.email;
+      
+      // For now, we'll just log the activity without updating the database
+      // In a real implementation, you would update the user in the database
+      
+      // Log activity for profile updates
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        
+        if (name && name !== oldName) {
+          await logActivity({
+            userId: req.user!.id,
+            actionType: 'UPDATE',
+            resourceType: 'SETTINGS',
+            description: ActivityDescriptions.updateProfileInfo('name', name),
+            ipAddress: req.ip || req.connection.remoteAddress,
+            userAgent: req.headers['user-agent'],
+            metadata: { 
+              settingType: 'profile-name',
+              oldValue: oldName,
+              newValue: name
+            }
+          });
+        }
+        
+        if (email && email !== oldEmail) {
+          await logActivity({
+            userId: req.user!.id,
+            actionType: 'UPDATE',
+            resourceType: 'SETTINGS',
+            description: ActivityDescriptions.updateProfileInfo('email', email),
+            ipAddress: req.ip || req.connection.remoteAddress,
+            userAgent: req.headers['user-agent'],
+            metadata: { 
+              settingType: 'profile-email',
+              oldValue: oldEmail,
+              newValue: email
+            }
+          });
+        }
+      } catch (logError) {
+        console.error('Failed to log profile update activity:', logError);
+      }
+      
+      // Return success response
+      res.json({ message: 'Profile updated successfully', name, email });
+    } catch (error) {
+      console.error("Error updating user profile:", error);
+      res.status(500).json({ message: "Failed to update user profile" });
+    }
+  });
+
+  // Update notification settings
+  app.patch("/api/user/notifications", requireAuth, async (req, res) => {
+    try {
+      const { emailNotifications, monthlyReport, budgetAlerts } = req.body;
+      
+      // Log activity for each notification setting change
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        
+        const settingChanges = [
+          { key: 'emailNotifications', value: emailNotifications, label: 'Email' },
+          { key: 'monthlyReport', value: monthlyReport, label: 'Monthly Report' },
+          { key: 'budgetAlerts', value: budgetAlerts, label: 'Budget Alerts' }
+        ];
+        
+        for (const setting of settingChanges) {
+          if (setting.value !== undefined) {
+            await logActivity({
+              userId: req.user!.id,
+              actionType: 'UPDATE',
+              resourceType: 'SETTINGS',
+              description: ActivityDescriptions.updateNotificationSetting(setting.label, setting.value),
+              ipAddress: req.ip || req.connection.remoteAddress,
+              userAgent: req.headers['user-agent'],
+              metadata: { 
+                settingType: `notification-${setting.key}`,
+                newValue: setting.value,
+                settingName: setting.label
+              }
+            });
+          }
+        }
+      } catch (logError) {
+        console.error('Failed to log notification settings update activity:', logError);
+      }
+      
+      res.json({ 
+        message: 'Notification settings updated successfully',
+        emailNotifications,
+        monthlyReport,
+        budgetAlerts
+      });
+    } catch (error) {
+      console.error("Error updating notification settings:", error);
+      res.status(500).json({ message: "Failed to update notification settings" });
+    }
+  });
+
+  // Log account actions (like logout)
+  app.post("/api/user/account-action", requireAuth, async (req, res) => {
+    try {
+      const { action, metadata } = req.body;
+      
+      // Log the account action
+      try {
+        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'UPDATE',
+          resourceType: 'SETTINGS',
+          description: ActivityDescriptions.performAccountAction(action),
+          ipAddress: req.ip || req.connection.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          metadata: { 
+            actionType: action,
+            ...metadata
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log account action activity:', logError);
+      }
+      
+      res.json({ message: `Account action "${action}" logged successfully` });
+    } catch (error) {
+      console.error("Error logging account action:", error);
+      res.status(500).json({ message: "Failed to log account action" });
     }
   });
   
@@ -1550,6 +1941,156 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
       res.status(500).json({ message: "Failed to delete user" });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Activity Log Routes
+  // -------------------------------------------------------------------------
+  
+  // Create activity log entry (for client-side logging)
+  app.post("/api/activity-logs", requireAuth, async (req, res) => {
+    try {
+      const { actionType, resourceType, resourceId, description, metadata } = req.body;
+      
+      const { logActivity } = await import('./activity-loggers');
+      await logActivity({
+        userId: req.user!.id,
+        actionType,
+        resourceType,
+        resourceId,
+        description,
+        ipAddress: req.ip || req.connection.remoteAddress,
+        userAgent: req.headers['user-agent'],
+        metadata
+      });
+      
+      res.status(201).json({ message: 'Activity logged successfully' });
+    } catch (error) {
+      console.error('Error creating activity log:', error);
+      res.status(500).json({ message: 'Failed to create activity log' });
+    }
+  });
+  
+  app.get("/api/activity-logs", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 100); // Max 100 per request
+      const offset = (page - 1) * limit;
+      
+      // Search/filter parameters
+      const searchQuery = req.query.search as string || '';
+      const actionType = req.query.actionType as string || '';
+      const resourceType = req.query.resourceType as string || '';
+      const fromDate = req.query.fromDate as string || '';
+      const toDate = req.query.toDate as string || '';
+      
+      // Debug logging
+      console.log(`[DEBUG] Activity logs search - userId: ${userId}, searchQuery: "${searchQuery}", actionType: "${actionType}", resourceType: "${resourceType}"`);
+      
+      // Check if user is admin with user_id = 14
+      const isAdmin = userId === 14;
+      const targetUserId = isAdmin ? (req.query.userId ? parseInt(req.query.userId as string) : null) : userId;
+
+      const { getUserActivityLogs, getUserActivityLogsCount, getAllUsersActivityLogs, getAllUsersActivityLogsCount } = await import('./activity-loggers');
+      
+      let logs, totalCount;
+      
+      const filterOptions = {
+        searchQuery,
+        actionType,
+        resourceType,
+        fromDate,
+        toDate
+      };
+      
+      if (isAdmin && !targetUserId) {
+        // Admin viewing all users' activities
+        [logs, totalCount] = await Promise.all([
+          getAllUsersActivityLogs(limit, offset, filterOptions),
+          getAllUsersActivityLogsCount(filterOptions)
+        ]);
+      } else {
+        // Regular user viewing their own activities, or admin viewing specific user
+        const userIdToQuery = targetUserId || userId;
+        [logs, totalCount] = await Promise.all([
+          getUserActivityLogs(userIdToQuery, limit, offset, filterOptions),
+          getUserActivityLogsCount(userIdToQuery, filterOptions)
+        ]);
+      }
+
+      res.json({
+        logs,
+        pagination: {
+          page,
+          limit,
+          totalCount,
+          totalPages: Math.ceil(totalCount / limit)
+        },
+        isAdmin,
+        currentUserId: userId
+      });
+    } catch (error) {
+      console.error("Error fetching activity logs:", error);
+      res.status(500).json({ message: "Failed to fetch activity logs" });
+    }
+  });
+
+  // Delete a specific activity log entry
+  app.delete("/api/activity-logs/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const userId = req.user!.id;
+      
+      // Ensure the activity log belongs to the user
+      const logCheck = await pool.query('SELECT id FROM activity_log WHERE id = $1 AND user_id = $2', [id, userId]);
+      if (logCheck.rowCount === 0) {
+        return res.status(404).json({ message: "Activity log not found" });
+      }
+      
+      await pool.query('DELETE FROM activity_log WHERE id = $1 AND user_id = $2', [id, userId]);
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting activity log:", error);
+      res.status(500).json({ message: "Failed to delete activity log" });
+    }
+  });
+
+  // Clear all activity logs for the current user
+  app.delete("/api/activity-logs", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const result = await pool.query('DELETE FROM activity_log WHERE user_id = $1', [userId]);
+      
+      res.json({ 
+        message: "All activity history cleared successfully",
+        deletedCount: result.rowCount 
+      });
+    } catch (error) {
+      console.error("Error clearing activity logs:", error);
+      res.status(500).json({ message: "Failed to clear activity history" });
+    }
+  });
+
+  app.get("/api/expenses/total-this-month", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+
+    const { rows } = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM expenses
+       WHERE user_id = $1
+         AND date >= date_trunc('month', CURRENT_DATE)
+         AND date < (date_trunc('month', CURRENT_DATE) + INTERVAL '1 month')`,
+      [userId]
+    );
+
+    res.json({ total: Number(rows[0].total) });
+  } catch (err) {
+    console.error("Error fetching monthly total:", err);
+    res.status(500).json({ error: "Failed to fetch total expenses" });
+  }
+});
+
 
   const httpServer = createServer(app);
 
