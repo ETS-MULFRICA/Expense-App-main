@@ -18,6 +18,7 @@ import {
 import { z } from "zod";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
+import { logActivity } from "./activity-loggers"; // Adjust path as needed
 
 /**
  * Authentication Middleware
@@ -69,36 +70,62 @@ const requireAdmin = async (req: Request, res: Response, next: Function) => {
  */
 export async function registerRoutes(app: Express): Promise<Server> {
   // -------------------------------------------------------------------------
-  // Income Deletion Route
-  // -------------------------------------------------------------------------
-  app.delete("/api/incomes/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      console.log("[DEBUG] DELETE /api/incomes/:id called with id:", id);
-      const income = await storage.getIncomeById(id);
-      const userRole = await storage.getUserRole(req.user!.id);
-      if (!income) {
-        console.log("[DEBUG] Income not found for id:", id);
-        return res.status(404).json({ message: "Income not found" });
-      }
-      // Allow admins to delete any income, otherwise only allow users to delete their own
-      if (income.userId !== req.user!.id && userRole !== 'admin') {
-        console.log("[DEBUG] User does not have permission to delete income. userId:", req.user!.id, "income.userId:", income.userId, "userRole:", userRole);
-        return res.status(403).json({ message: "You don't have permission to delete this income" });
-      }
-      await storage.deleteIncome(id);
-      console.log("[DEBUG] Called storage.deleteIncome for id:", id);
-      res.status(204).send();
-    } catch (error) {
-      console.error("Error deleting income:", error);
-      res.status(500).json({ message: "Failed to delete income" });
+// Income Deletion Route
+// -------------------------------------------------------------------------
+app.delete("/api/incomes/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    console.log("[DEBUG] DELETE /api/incomes/:id called with id:", id);
+    const income = await storage.getIncomeById(id);
+    const userRole = await storage.getUserRole(req.user!.id);
+    if (!income) {
+      console.log("[DEBUG] Income not found for id:", id);
+      return res.status(404).json({ message: "Income not found" });
     }
-  });
-  // -------------------------------------------------------------------------
-  // User Income Category Routes
-  // ------------------------------------------------------------------------- 
-  // Create a user-specific income category
-  app.post("/api/user-income-categories", requireAuth, async (req, res) => {
+    // Allow admins to delete any income, otherwise only allow users to delete their own
+    if (income.userId !== req.user!.id && userRole !== 'admin') {
+      console.log("[DEBUG] User does not have permission to delete income. userId:", req.user!.id, "income.userId:", income.userId, "userRole:", userRole);
+      return res.status(403).json({ message: "You don't have permission to delete this income" });
+    }
+    await storage.deleteIncome(id);
+    console.log("[DEBUG] Called storage.deleteIncome for id:", id);
+    
+    // Log activity for income deletion
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'DELETE',
+        resourceType: 'INCOME',
+        resourceId: id,
+        description: `Deleted income: ${income.description} - ${income.amount.toLocaleString()} FCFA`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          amount: income.amount,
+          description: income.description,
+          category: income.categoryName,
+          source: income.source,
+          date: income.date,
+          deletedByAdmin: userRole === 'admin' && income.userId !== req.user!.id
+        }
+      });
+      console.log('[DEBUG] Activity logged for income deletion');
+    } catch (logError) {
+      console.error('Failed to log activity for income deletion:', logError);
+    }
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting income:", error);
+    res.status(500).json({ message: "Failed to delete income" });
+  }
+});
+
+// -------------------------------------------------------------------------
+// User Income Category Routes
+// -------------------------------------------------------------------------
+// Create a user-specific income category
+app.post("/api/user-income-categories", requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const { name } = req.body;
@@ -600,102 +627,125 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   
   // -------------------------------------------------------------------------
-  // Expense Routes
-  // -------------------------------------------------------------------------
-  app.get("/api/expenses", requireAuth, async (req, res) => {
-    try {
-      const expenses = await storage.getExpensesByUserId(req.user!.id);
+// Expense Routes
+// -------------------------------------------------------------------------
+app.get("/api/expenses", requireAuth, async (req, res) => {
+  try {
+    const expenses = await storage.getExpensesByUserId(req.user!.id);
+    
+    // Augment each expense with category and subcategory names
+    const augmentedExpenses = await Promise.all(expenses.map(async (expense) => {
+      const category = await storage.getExpenseCategoryById(expense.categoryId);
       
-      // Augment each expense with category and subcategory names
-      const augmentedExpenses = await Promise.all(expenses.map(async (expense) => {
-        const category = await storage.getExpenseCategoryById(expense.categoryId);
-        
-        let subcategory = null;
-        if (expense.subcategoryId) {
-          subcategory = await storage.getExpenseSubcategoryById(expense.subcategoryId);
+      let subcategory = null;
+      if (expense.subcategoryId) {
+        subcategory = await storage.getExpenseSubcategoryById(expense.subcategoryId);
+      }
+      
+      return {
+        ...expense,
+        categoryName: category?.name || 'Unknown',
+        subcategoryName: subcategory?.name || null
+      };
+    }));
+    
+console.log("[DEBUG] /api/expenses for userId:", req.user!.id, "expenses:", augmentedExpenses);
+res.json(augmentedExpenses);
+  } catch (error) {
+    console.error("Error fetching expenses:", error);
+    res.status(500).json({ message: "Failed to fetch expenses" });
+  }
+});
+
+app.post("/api/expenses", requireAuth, async (req, res) => {
+  try {
+    // Ensure date is properly parsed, especially if it came as an ISO string
+    const data = req.body;
+    if (data.date && typeof data.date === 'string') {
+      data.date = new Date(data.date);
+    }
+    
+    // Check if we're using legacy or new schema
+    let expense;
+    
+    if ('category' in data) {
+      // Legacy mode (string category)
+      const expenseData = legacyInsertExpenseSchema.parse(data);
+      expense = await storage.createLegacyExpense({
+        ...expenseData,
+        userId: req.user!.id
+      });
+    } else {
+      // New mode (category ID)
+      const expenseData = insertExpenseSchema.parse(data);
+
+    // Only check that the category exists
+    const categoryResult = await pool.query('SELECT * FROM expense_categories WHERE id = $1', [expenseData.categoryId]);
+    const category = categoryResult.rows[0];
+    if (!category) {
+      return res.status(403).json({ message: "Invalid category" });
+    }
+      
+      expense = await storage.createExpense({
+        ...expenseData,
+        userId: req.user!.id
+      });
+    }
+    
+    // Log activity for expense creation
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'CREATE',
+        resourceType: 'EXPENSE',
+        resourceId: expense.id,
+        description: `Created expense: ${expense.description} - ${expense.amount.toLocaleString()} FCFA`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          amount: expense.amount,
+          description: expense.description,
+          category: expense.category_name,
+          merchant: expense.merchant,
+          date: expense.date
         }
-        
-        return {
-          ...expense,
-          categoryName: category?.name || 'Unknown',
-          subcategoryName: subcategory?.name || null
-        };
-      }));
-      
-  console.log("[DEBUG] /api/expenses for userId:", req.user!.id, "expenses:", augmentedExpenses);
-  res.json(augmentedExpenses);
-    } catch (error) {
-      console.error("Error fetching expenses:", error);
-      res.status(500).json({ message: "Failed to fetch expenses" });
+      });
+      console.log('[DEBUG] Activity logged for expense creation');
+    } catch (logError) {
+      console.error('Failed to log activity for expense creation:', logError);
     }
-  });
-
-  app.post("/api/expenses", requireAuth, async (req, res) => {
-    try {
-      // Ensure date is properly parsed, especially if it came as an ISO string
-      const data = req.body;
-      if (data.date && typeof data.date === 'string') {
-        data.date = new Date(data.date);
-      }
-      
-      // Check if we're using legacy or new schema
-      let expense;
-      
-      if ('category' in data) {
-        // Legacy mode (string category)
-        const expenseData = legacyInsertExpenseSchema.parse(data);
-        expense = await storage.createLegacyExpense({
-          ...expenseData,
-          userId: req.user!.id
-        });
-      } else {
-        // New mode (category ID)
-        const expenseData = insertExpenseSchema.parse(data);
-
-      // Only check that the category exists
-      const categoryResult = await pool.query('SELECT * FROM expense_categories WHERE id = $1', [expenseData.categoryId]);
-      const category = categoryResult.rows[0];
-      if (!category) {
-        return res.status(403).json({ message: "Invalid category" });
-      }
-        
-        expense = await storage.createExpense({
-          ...expenseData,
-          userId: req.user!.id
-        });
-      }
-      
-      res.status(201).json(expense);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error creating expense:", error);
-        res.status(500).json({ message: "Failed to create expense" });
-      }
+    
+    res.status(201).json(expense);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
+    } else {
+      console.error("Error creating expense:", error);
+      res.status(500).json({ message: "Failed to create expense" });
     }
-  });
+  }
+});
 
-  app.get("/api/expenses/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const expense = await storage.getExpenseById(id);
-      
-      if (!expense) {
-        return res.status(404).json({ message: "Expense not found" });
-      }
-      
-      if (expense.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to access this expense" });
-      }
-      
-      res.json(expense);
-    } catch (error) {
-      console.error("Error fetching expense:", error);
-      res.status(500).json({ message: "Failed to fetch expense" });
+app.get("/api/expenses/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const expense = await storage.getExpenseById(id);
+    
+    if (!expense) {
+      return res.status(404).json({ message: "Expense not found" });
     }
-  });
+    
+    if (expense.userId !== req.user!.id) {
+      return res.status(403).json({ message: "You don't have permission to access this expense" });
+    }
+    
+    res.json(expense);
+  } catch (error) {
+    console.error("Error fetching expense:", error);
+    res.status(500).json({ message: "Failed to fetch expense" });
+  }
+});
 
 app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
   try {
@@ -740,1338 +790,1747 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
       [amount, description, date, merchant, notes, categoryId, categoryName, id]
     );
 
-    res.json(result.rows[0]);
+    const updatedExpense = result.rows[0];
+
+    // Log activity for expense update
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'UPDATE',
+        resourceType: 'EXPENSE',
+        resourceId: updatedExpense.id,
+        description: `Updated expense: ${description} - ${amount.toLocaleString()} FCFA`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          amount: amount,
+          description: description,
+          category: categoryName,
+          merchant: merchant,
+          date: date,
+          previousAmount: expense.amount,
+          previousDescription: expense.description
+        }
+      });
+      console.log('[DEBUG] Activity logged for expense update');
+    } catch (logError) {
+      console.error('Failed to log activity for expense update:', logError);
+    }
+
+    res.json(updatedExpense);
   } catch (error) {
     console.error("Error updating expense:", error);
     res.status(500).json({ message: "Failed to update expense" });
   }
 });
 
-
-
-  app.delete("/api/expenses/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const expense = await storage.getExpenseById(id);
-      const userRole = await storage.getUserRole(req.user!.id);
-      
-      if (!expense) {
-        return res.status(404).json({ message: "Expense not found" });
-      }
-      console.log({expense,userRole,reqUserId:req.user!.id});
-      
-      // Allow admins to delete any expense, otherwise only allow users to delete their own
-      if (expense.user_id !== req.user!.id && userRole !== 'admin') {
-        return res.status(403).json({ message: "You don't have permission to delete this expense" });
-      }
-      
-      await storage.deleteExpense(id);
-      res.status(204).send();
-    } catch (error) {
-      console.error("Error deleting expense:", error);
-      res.status(500).json({ message: "Failed to delete expense" });
-    }
-  });
-  
-  // -------------------------------------------------------------------------
-  // Income Routes
-  // -------------------------------------------------------------------------
-  app.get("/api/incomes", requireAuth, async (req, res) => {
-    try {
-      const incomes = await storage.getIncomesByUserId(req.user!.id);
-      
-      // Augment each income with category and subcategory names
-      const augmentedIncomes = await Promise.all(incomes.map(async (income) => {
-        let categoryName = '';
-        
-        if (income.categoryId) {
-          // System or user-defined category
-          const category = await storage.getIncomeCategoryById(income.categoryId);
-          categoryName = category?.name || 'Unknown';
-        } else if (income.categoryName) {
-          // Custom category (stored directly in category_name field)
-          categoryName = income.categoryName;
-        } else {
-          // Fallback
-          categoryName = 'Uncategorized';
-        }
-        
-        let subcategory = null;
-        if (income.subcategoryId) {
-          subcategory = await storage.getIncomeSubcategoryById(income.subcategoryId);
-        }
-        
-        return {
-          ...income,
-          categoryName: categoryName,
-          subcategoryName: subcategory?.name || null
-        };
-      }));
-      
-  console.log("[DEBUG] /api/incomes for userId:", req.user!.id, "incomes:", augmentedIncomes);
-  res.json(augmentedIncomes);
-    } catch (error) {
-      console.error("Error fetching incomes:", error);
-      res.status(500).json({ message: "Failed to fetch incomes" });
-    }
-  });
-
-  app.post("/api/incomes", requireAuth, async (req, res) => {
-  console.log('[DEBUG] POST /api/incomes received body:', req.body);
-
+app.delete("/api/expenses/:id", requireAuth, async (req, res) => {
   try {
+    const id = parseInt(req.params.id);
+    const expense = await storage.getExpenseById(id);
+    const userRole = await storage.getUserRole(req.user!.id);
+    
+    if (!expense) {
+      return res.status(404).json({ message: "Expense not found" });
+    }
+    console.log({expense,userRole,reqUserId:req.user!.id});
+    
+    // Allow admins to delete any expense, otherwise only allow users to delete their own
+    if (expense.user_id !== req.user!.id && userRole !== 'admin') {
+      return res.status(403).json({ message: "You don't have permission to delete this expense" });
+    }
+    
+    await storage.deleteExpense(id);
+    
+    // Log activity for expense deletion
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'DELETE',
+        resourceType: 'EXPENSE',
+        resourceId: id,
+        description: `Deleted expense: ${expense.description} - ${expense.amount.toLocaleString()} FCFA`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          amount: expense.amount,
+          description: expense.description,
+          category: expense.category_name,
+          merchant: expense.merchant,
+          date: expense.date
+        }
+      });
+      console.log('[DEBUG] Activity logged for expense deletion');
+    } catch (logError) {
+      console.error('Failed to log activity for expense deletion:', logError);
+    }
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting expense:", error);
+    res.status(500).json({ message: "Failed to delete expense" });
+  }
+});
+  
+// -------------------------------------------------------------------------
+// Income Routes
+// -------------------------------------------------------------------------
+app.get("/api/incomes", requireAuth, async (req, res) => {
+  try {
+    const incomes = await storage.getIncomesByUserId(req.user!.id);
+    
+    // Augment each income with category and subcategory names
+    const augmentedIncomes = await Promise.all(incomes.map(async (income) => {
+      let categoryName = '';
+      
+      if (income.categoryId) {
+        // System or user-defined category
+        const category = await storage.getIncomeCategoryById(income.categoryId);
+        categoryName = category?.name || 'Unknown';
+      } else if (income.categoryName) {
+        // Custom category (stored directly in category_name field)
+        categoryName = income.categoryName;
+      } else {
+        // Fallback
+        categoryName = 'Uncategorized';
+      }
+      
+      let subcategory = null;
+      if (income.subcategoryId) {
+        subcategory = await storage.getIncomeSubcategoryById(income.subcategoryId);
+      }
+      
+      return {
+        ...income,
+        categoryName: categoryName,
+        subcategoryName: subcategory?.name || null
+      };
+    }));
+    
+console.log("[DEBUG] /api/incomes for userId:", req.user!.id, "incomes:", augmentedIncomes);
+res.json(augmentedIncomes);
+  } catch (error) {
+    console.error("Error fetching incomes:", error);
+    res.status(500).json({ message: "Failed to fetch incomes" });
+  }
+});
+
+app.post("/api/incomes", requireAuth, async (req, res) => {
+console.log('[DEBUG] POST /api/incomes received body:', req.body);
+
+try {
+  const data = req.body;
+  const userId = req.user!.id;
+
+  // Ensure date is a Date object
+  if (data.date && typeof data.date === 'string') {
+    data.date = new Date(data.date);
+  }
+
+  let categoryName = data.categoryName?.trim();
+  if (!categoryName) {
+    return res.status(400).json({ message: "Please provide a category name." });
+  }
+
+  // Define system categories (IDs are placeholders; real IDs should exist in DB)
+  const systemCategories = [
+    { name: 'Wages' },
+    { name: 'Deals' },
+    { name: 'Other' }
+  ];
+
+  // Check if category exists in DB for this user
+  let categoryCheck = await pool.query(
+    'SELECT id, name FROM income_categories WHERE user_id = $1 AND name = $2',
+    [userId, categoryName]
+  );
+
+  let finalCategoryId: number;
+  let finalCategoryName: string;
+
+  if (categoryCheck.rows.length > 0) {
+    // Category exists
+    finalCategoryId = categoryCheck.rows[0].id;
+    finalCategoryName = categoryCheck.rows[0].name;
+  } else {
+    // If not, insert new category (system or custom)
+    const isSystem = systemCategories.some(
+      cat => cat.name.toLowerCase() === categoryName.toLowerCase()
+    );
+
+    const newCat = await pool.query(
+      'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, $4) RETURNING id, name',
+      [userId, categoryName, isSystem ? `System category: ${categoryName}` : null, isSystem]
+    );
+
+    finalCategoryId = newCat.rows[0].id;
+    finalCategoryName = newCat.rows[0].name;
+  }
+
+  // Insert the income
+  const result = await pool.query(
+    `INSERT INTO incomes
+     (user_id, amount, description, date, category_id, category_name, source, notes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      userId,
+      data.amount,
+      data.description,
+      data.date,
+      finalCategoryId,
+      finalCategoryName,
+      data.source,
+      data.notes
+    ]
+  );
+
+  const newIncome = result.rows[0];
+  console.log('[DEBUG] Inserted income result:', newIncome);
+
+  // Log activity for income creation
+  try {
+    await logActivity({
+      userId: userId,
+      actionType: 'CREATE',
+      resourceType: 'INCOME',
+      resourceId: newIncome.id,
+      description: `Added income: ${data.description} - ${data.amount.toLocaleString()} FCFA`,
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent'),
+      metadata: {
+        amount: data.amount,
+        description: data.description,
+        category: finalCategoryName,
+        source: data.source,
+        date: data.date
+      }
+    });
+    console.log('[DEBUG] Activity logged for income creation');
+  } catch (logError) {
+    console.error('Failed to log activity for income creation:', logError);
+    // Don't fail the request if logging fails
+  }
+
+  res.status(201).json(newIncome);
+
+} catch (error) {
+  if (error instanceof ZodError) {
+    const validationError = fromZodError(error);
+    res.status(400).json({ message: validationError.message });
+  } else {
+    console.error("Error creating income:", error);
+    res.status(500).json({ message: "Failed to create income" });
+  }
+}
+});
+
+app.patch("/api/incomes/:id", requireAuth, async (req, res) => {
+try {
+  const id = parseInt(req.params.id);
+  const income = await storage.getIncomeById(id);
+
+  if (!income) return res.status(404).json({ message: "Income not found" });
+  if (income.userId !== req.user!.id) return res.status(403).json({ message: "You don't have permission" });
+
+  const data = req.body;
+  if (data.date && typeof data.date === "string") data.date = new Date(data.date);
+
+  const incomeData = insertIncomeSchema.parse(data);
+  const userId = req.user!.id;
+
+  const categoryName = req.body.categoryName?.trim();
+  if (!categoryName) return res.status(400).json({ message: "Category name required" });
+
+  // Check if category exists for this user
+  let categoryCheck = await pool.query(
+    'SELECT id, name FROM income_categories WHERE user_id = $1 AND name = $2',
+    [userId, categoryName]
+  );
+
+  let finalCategoryId: number;
+  let finalCategoryName: string;
+
+  if (categoryCheck.rows.length > 0) {
+    finalCategoryId = categoryCheck.rows[0].id;
+    finalCategoryName = categoryCheck.rows[0].name;
+  } else {
+    // Insert new category
+    const newCat = await pool.query(
+      'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, false) RETURNING id, name',
+      [userId, categoryName, null]
+    );
+    finalCategoryId = newCat.rows[0].id;
+    finalCategoryName = newCat.rows[0].name;
+  }
+
+  // Optional: verify subcategory
+  if (incomeData.subcategoryId) {
+    const subcategory = await storage.getIncomeSubcategoryById(incomeData.subcategoryId);
+    if (!subcategory || subcategory.categoryId !== finalCategoryId) {
+      return res.status(403).json({ message: "Invalid subcategory" });
+    }
+  }
+
+  // Update income
+  const result = await pool.query(
+    `UPDATE incomes
+     SET amount=$1, description=$2, date=$3, category_id=$4, category_name=$5, subcategory_id=$6, source=$7, notes=$8
+     WHERE id=$9 AND user_id=$10
+     RETURNING *`,
+    [
+      incomeData.amount,
+      incomeData.description,
+      incomeData.date,
+      finalCategoryId,
+      finalCategoryName,
+      incomeData.subcategoryId,
+      incomeData.source,
+      incomeData.notes,
+      id,
+      userId
+    ]
+  );
+
+  if (result.rows.length === 0) return res.status(404).json({ message: "Income not found" });
+
+  const updatedIncome = result.rows[0];
+
+  // Log activity for income update
+  try {
+    await logActivity({
+      userId: userId,
+      actionType: 'UPDATE',
+      resourceType: 'INCOME',
+      resourceId: updatedIncome.id,
+      description: `Updated income: ${incomeData.description} - ${incomeData.amount.toLocaleString()} FCFA`,
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent'),
+      metadata: {
+        amount: incomeData.amount,
+        description: incomeData.description,
+        category: finalCategoryName,
+        source: incomeData.source,
+        date: incomeData.date,
+        previousAmount: income.amount,
+        previousDescription: income.description
+      }
+    });
+    console.log('[DEBUG] Activity logged for income update');
+  } catch (logError) {
+    console.error('Failed to log activity for income update:', logError);
+    // Don't fail the request if logging fails
+  }
+
+  res.json(updatedIncome);
+} catch (error) {
+  console.error("Error updating income:", error);
+  res.status(500).json({ message: "Failed to update income" });
+}
+});
+
+
+  // Budget Routes
+app.get("/api/budgets", requireAuth, async (req, res) => {
+  try {
+    const budgets = await storage.getBudgetsByUserId(req.user!.id);
+    
+    // Add performance data to each budget
+    const budgetsWithPerformance = await Promise.all(
+      budgets.map(async (budget) => {
+        const performance = await storage.getBudgetPerformance(budget.id);
+        return {
+          ...budget,
+          allocatedAmount: performance.allocated,
+          spentAmount: performance.spent,
+          remainingAmount: performance.remaining
+        };
+      })
+    );
+    
+    res.json(budgetsWithPerformance);
+  } catch (error) {
+    console.error("Error fetching budgets:", error);
+    res.status(500).json({ message: "Failed to fetch budgets" });
+  }
+});
+
+app.post("/api/budgets", requireAuth, async (req, res) => {
+  try {
+    // Ensure dates are properly parsed, especially if they came as ISO strings
     const data = req.body;
-    const userId = req.user!.id;
-
-    // Ensure date is a Date object
-    if (data.date && typeof data.date === 'string') {
-      data.date = new Date(data.date);
+    if (data.startDate && typeof data.startDate === 'string') {
+      data.startDate = new Date(data.startDate);
     }
-
-    let categoryName = data.categoryName?.trim();
-    if (!categoryName) {
-      return res.status(400).json({ message: "Please provide a category name." });
+    if (data.endDate && typeof data.endDate === 'string') {
+      data.endDate = new Date(data.endDate);
     }
-
-    // Define system categories (IDs are placeholders; real IDs should exist in DB)
-    const systemCategories = [
-      { name: 'Wages' },
-      { name: 'Deals' },
-      { name: 'Other' }
-    ];
-
-    // Check if category exists in DB for this user
-    let categoryCheck = await pool.query(
-      'SELECT id, name FROM income_categories WHERE user_id = $1 AND name = $2',
-      [userId, categoryName]
-    );
-
-    let finalCategoryId: number;
-    let finalCategoryName: string;
-
-    if (categoryCheck.rows.length > 0) {
-      // Category exists
-      finalCategoryId = categoryCheck.rows[0].id;
-      finalCategoryName = categoryCheck.rows[0].name;
-    } else {
-      // If not, insert new category (system or custom)
-      const isSystem = systemCategories.some(
-        cat => cat.name.toLowerCase() === categoryName.toLowerCase()
-      );
-
-      const newCat = await pool.query(
-        'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, $4) RETURNING id, name',
-        [userId, categoryName, isSystem ? `System category: ${categoryName}` : null, isSystem]
-      );
-
-      finalCategoryId = newCat.rows[0].id;
-      finalCategoryName = newCat.rows[0].name;
+    
+    // Extract categoryIds before validation
+    const categoryIds = data.categoryIds;
+    delete data.categoryIds;
+    
+    const budgetData = insertBudgetSchema.parse(data);
+    const budget = await storage.createBudget({
+      ...budgetData,
+      userId: req.user!.id
+    });
+    
+    // If categories are provided, create budget allocations for them
+    if (categoryIds && Array.isArray(categoryIds) && categoryIds.length > 0) {
+      const budgetId = budget.id;
+      
+      // Verify all categories belong to the user
+      for (const categoryId of categoryIds) {
+        const category = await storage.getExpenseCategoryById(categoryId);
+        if (category && category.userId === req.user!.id) {
+          // Create an initial allocation with zero amount that can be updated later
+          await storage.createBudgetAllocation({
+            budgetId,
+            categoryId,
+            subcategoryId: null,
+            amount: 0
+          });
+        }
+      }
     }
-
-    // Insert the income
-    const result = await pool.query(
-      `INSERT INTO incomes
-       (user_id, amount, description, date, category_id, category_name, source, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [
-        userId,
-        data.amount,
-        data.description,
-        data.date,
-        finalCategoryId,
-        finalCategoryName,
-        data.source,
-        data.notes
-      ]
-    );
-
-    console.log('[DEBUG] Inserted income result:', result.rows[0]);
-    res.status(201).json(result.rows[0]);
-
+    
+    // Log activity for budget creation
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'CREATE',
+        resourceType: 'BUDGET',
+        resourceId: budget.id,
+        description: `Created budget "${budget.name}" with total amount ${budget.amount} FCFA`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          name: budget.name,
+          totalAmount: budget.amount,
+          period: budget.period,
+          startDate: budget.startDate,
+          endDate: budget.endDate,
+          categoryCount: categoryIds?.length || 0
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget creation');
+    } catch (logError) {
+      console.error('Failed to log activity for budget creation:', logError);
+    }
+    
+    res.status(201).json(budget);
   } catch (error) {
     if (error instanceof ZodError) {
       const validationError = fromZodError(error);
       res.status(400).json({ message: validationError.message });
     } else {
-      console.error("Error creating income:", error);
-      res.status(500).json({ message: "Failed to create income" });
+      console.error("Error creating budget:", error);
+      res.status(500).json({ message: "Failed to create budget" });
     }
   }
 });
 
-
-  app.patch("/api/incomes/:id", requireAuth, async (req, res) => {
+app.get("/api/budgets/:id", requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    const income = await storage.getIncomeById(id);
+    const budget = await storage.getBudgetById(id);
+    
+    if (!budget) {
+      return res.status(404).json({ message: "Budget not found" });
+    }
+    
+    if (budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "You don't have permission to access this budget" });
+    }
+    
+    // Get all budget allocations as well
+    const allocations = await storage.getBudgetAllocations(id);
+    
+    // Get budget performance
+    const performance = await storage.getBudgetPerformance(id);
+    
+    res.json({
+      budget,
+      allocations,
+      performance
+    });
+  } catch (error) {
+    console.error("Error fetching budget:", error);
+    res.status(500).json({ message: "Failed to fetch budget" });
+  }
+});
 
-    if (!income) return res.status(404).json({ message: "Income not found" });
-    if (income.userId !== req.user!.id) return res.status(403).json({ message: "You don't have permission" });
-
+app.patch("/api/budgets/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const budget = await storage.getBudgetById(id);
+    
+    if (!budget) {
+      return res.status(404).json({ message: "Budget not found" });
+    }
+    
+    if (budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "You don't have permission to update this budget" });
+    }
+    
+    // Ensure dates are properly parsed, especially if they came as ISO strings
     const data = req.body;
-    if (data.date && typeof data.date === "string") data.date = new Date(data.date);
-
-    const incomeData = insertIncomeSchema.parse(data);
-    const userId = req.user!.id;
-
-    const categoryName = req.body.categoryName?.trim();
-    if (!categoryName) return res.status(400).json({ message: "Category name required" });
-
-    // Check if category exists for this user
-    let categoryCheck = await pool.query(
-      'SELECT id, name FROM income_categories WHERE user_id = $1 AND name = $2',
-      [userId, categoryName]
-    );
-
-    let finalCategoryId: number;
-    let finalCategoryName: string;
-
-    if (categoryCheck.rows.length > 0) {
-      finalCategoryId = categoryCheck.rows[0].id;
-      finalCategoryName = categoryCheck.rows[0].name;
+    if (data.startDate && typeof data.startDate === 'string') {
+      data.startDate = new Date(data.startDate);
+    }
+    if (data.endDate && typeof data.endDate === 'string') {
+      data.endDate = new Date(data.endDate);
+    }
+    
+    const budgetData = insertBudgetSchema.parse(data);
+    const updatedBudget = await storage.updateBudget(id, budgetData);
+    
+    // Log activity for budget update
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'UPDATE',
+        resourceType: 'BUDGET',
+        resourceId: updatedBudget.id,
+        description: `Updated budget "${updatedBudget.name}" - Amount: ${budget.amount} → ${updatedBudget.amount} FCFA, Period: ${budget.period} → ${updatedBudget.period}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          name: updatedBudget.name,
+          previousAmount: budget.amount,
+          newAmount: updatedBudget.amount,
+          previousPeriod: budget.period,
+          newPeriod: updatedBudget.period,
+          previousStartDate: budget.startDate,
+          newStartDate: updatedBudget.startDate,
+          previousEndDate: budget.endDate,
+          newEndDate: updatedBudget.endDate
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget update');
+    } catch (logError) {
+      console.error('Failed to log activity for budget update:', logError);
+    }
+    
+    res.json(updatedBudget);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
     } else {
-      // Insert new category
-      const newCat = await pool.query(
-        'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, false) RETURNING id, name',
-        [userId, categoryName, null]
-      );
-      finalCategoryId = newCat.rows[0].id;
-      finalCategoryName = newCat.rows[0].name;
+      console.error("Error updating budget:", error);
+      res.status(500).json({ message: "Failed to update budget" });
+    }
+  }
+});
+
+// PUT route for budget updates (same as PATCH)
+app.put("/api/budgets/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const budget = await storage.getBudgetById(id);
+    
+    if (!budget) {
+      return res.status(404).json({ message: "Budget not found" });
+    }
+    
+    if (budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "You don't have permission to update this budget" });
+    }
+    
+    // Ensure dates are properly parsed, especially if they came as ISO strings
+    const data = req.body;
+    if (data.startDate && typeof data.startDate === 'string') {
+      data.startDate = new Date(data.startDate);
+    }
+    if (data.endDate && typeof data.endDate === 'string') {
+      data.endDate = new Date(data.endDate);
+    }
+    
+    const budgetData = insertBudgetSchema.parse(data);
+    const updatedBudget = await storage.updateBudget(id, budgetData);
+    
+    // Log activity for budget update (PUT)
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'UPDATE',
+        resourceType: 'BUDGET',
+        resourceId: updatedBudget.id,
+        description: `Updated budget "${updatedBudget.name}" - Amount: ${budget.amount} → ${updatedBudget.amount} FCFA, Period: ${budget.period} → ${updatedBudget.period}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          name: updatedBudget.name,
+          previousAmount: budget.amount,
+          newAmount: updatedBudget.amount,
+          previousPeriod: budget.period,
+          newPeriod: updatedBudget.period
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget update (PUT)');
+    } catch (logError) {
+      console.error('Failed to log activity for budget update:', logError);
+    }
+    
+    res.json(updatedBudget);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
+    } else {
+      console.error("Error updating budget:", error);
+      res.status(500).json({ message: "Failed to update budget" });
+    }
+  }
+});
+
+app.delete("/api/budgets/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const budget = await storage.getBudgetById(id);
+    
+    if (!budget) {
+      return res.status(404).json({ message: "Budget not found" });
+    }
+    
+    if (budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "You don't have permission to delete this budget" });
+    }
+    
+    await storage.deleteBudget(id);
+    
+    // Log activity for budget deletion
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'DELETE',
+        resourceType: 'BUDGET',
+        resourceId: id,
+        description: `Deleted budget "${budget.name}"`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          name: budget.name,
+          totalAmount: budget.amount,
+          period: budget.period
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget deletion');
+    } catch (logError) {
+      console.error('Failed to log activity for budget deletion:', logError);
+    }
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting budget:", error);
+    res.status(500).json({ message: "Failed to delete budget" });
+  }
+});
+  
+  // -------------------------------------------------------------------------
+// Budget Allocation Routes
+// -------------------------------------------------------------------------
+app.get("/api/budgets/:budgetId/allocations", requireAuth, async (req, res) => {
+  try {
+    const budgetId = parseInt(req.params.budgetId);
+    const budget = await storage.getBudgetById(budgetId);
+    
+    if (!budget) {
+      return res.status(404).json({ message: "Budget not found" });
+    }
+    
+    if (budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "You don't have permission to access this budget" });
+    }
+    
+    const allocations = await storage.getBudgetAllocations(budgetId);
+    res.json(allocations);
+  } catch (error) {
+    console.error("Error fetching budget allocations:", error);
+    res.status(500).json({ message: "Failed to fetch budget allocations" });
+  }
+});
+
+app.get("/api/budgets/:budgetId/performance", requireAuth, async (req, res) => {
+  try {
+    const budgetId = parseInt(req.params.budgetId);
+    const budget = await storage.getBudgetById(budgetId);
+    
+    if (!budget) {
+      return res.status(404).json({ message: "Budget not found" });
+    }
+    
+    if (budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "You don't have permission to access this budget" });
+    }
+    
+    const performance = await storage.getBudgetPerformance(budgetId);
+    res.json(performance);
+  } catch (error) {
+    console.error("Error fetching budget performance:", error);
+    res.status(500).json({ message: "Failed to fetch budget performance" });
+  }
+});
+
+// POST route for budget allocations (nested under budget)
+app.post("/api/budgets/:budgetId/allocations", requireAuth, async (req, res) => {
+  try {
+    const budgetId = parseInt(req.params.budgetId);
+    const allocationData = insertBudgetAllocationSchema.parse(req.body);
+    
+    // Verify the budget belongs to the user
+    const budget = await storage.getBudgetById(budgetId);
+    if (!budget || budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "Invalid budget" });
     }
 
-    // Optional: verify subcategory
-    if (incomeData.subcategoryId) {
-      const subcategory = await storage.getIncomeSubcategoryById(incomeData.subcategoryId);
-      if (!subcategory || subcategory.categoryId !== finalCategoryId) {
+    // Ensure the budgetId matches
+    const finalAllocationData = {
+      ...allocationData,
+      budgetId: budgetId
+    };
+
+    const allocation = await storage.createBudgetAllocation(finalAllocationData);
+
+    // Log activity for budget allocation creation
+    try {
+      const category = await storage.getExpenseCategoryById(allocationData.categoryId);
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'CREATE',
+        resourceType: 'BUDGET_ALLOCATION',
+        resourceId: allocation.id,
+        description: `Added ${allocation.amount.toLocaleString()} FCFA allocation for "${category?.name || 'Unknown'}" to budget "${budget.name}"`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: {
+          budgetName: budget.name,
+          categoryName: category?.name || 'Unknown',
+          amount: allocation.amount,
+          budgetId: budget.id,
+          categoryId: allocationData.categoryId
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget allocation creation');
+    } catch (logError) {
+      console.error('Failed to log activity for budget allocation creation:', logError);
+    }
+
+    res.status(201).json(allocation);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: "Invalid data", errors: error.errors });
+    } else {
+      console.error("Error creating budget allocation:", error);
+      res.status(500).json({ message: "Failed to create budget allocation" });
+    }
+  }
+});
+
+app.post("/api/budget-allocations", requireAuth, async (req, res) => {
+  try {
+    const allocationData = insertBudgetAllocationSchema.parse(req.body);
+    
+    // Verify the budget belongs to the user
+    const budget = await storage.getBudgetById(allocationData.budgetId);
+    if (!budget || budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "Invalid budget" });
+    }
+    
+    // Verify the category belongs to the user
+    const category = await storage.getExpenseCategoryById(allocationData.categoryId);
+    if (!category || category.userId !== req.user!.id) {
+      return res.status(403).json({ message: "Invalid category" });
+    }
+    
+    // If subcategory is provided, verify it belongs to the category
+    if (allocationData.subcategoryId) {
+      const subcategory = await storage.getExpenseSubcategoryById(allocationData.subcategoryId);
+      if (!subcategory || subcategory.categoryId !== allocationData.categoryId) {
+        return res.status(403).json({ message: "Invalid subcategory" });
+      }
+    }
+    
+    const allocation = await storage.createBudgetAllocation(allocationData);
+
+    // Log activity for budget allocation creation
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'CREATE',
+        resourceType: 'BUDGET_ALLOCATION',
+        resourceId: allocation.id,
+        description: `Added ${allocation.amount.toLocaleString()} FCFA allocation for "${category.name}" to budget "${budget.name}"`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          budgetName: budget.name,
+          categoryName: category.name,
+          amount: allocation.amount,
+          budgetId: budget.id,
+          categoryId: category.id
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget allocation creation');
+    } catch (logError) {
+      console.error('Failed to log activity for budget allocation creation:', logError);
+    }
+
+    res.status(201).json(allocation);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
+    } else {
+      console.error("Error creating budget allocation:", error);
+      res.status(500).json({ message: "Failed to create budget allocation" });
+    }
+  }
+});
+
+app.patch("/api/budget-allocations/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const allocationData = insertBudgetAllocationSchema.parse(req.body);
+    
+    // Verify the budget belongs to the user
+    const budget = await storage.getBudgetById(allocationData.budgetId);
+    if (!budget || budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "Invalid budget" });
+    }
+    
+    // Verify the category belongs to the user
+    const category = await storage.getExpenseCategoryById(allocationData.categoryId);
+    if (!category || (!category.isSystem && category.userId !== req.user!.id)) {
+      return res.status(403).json({ message: "Invalid category" });
+    }
+    
+    // If subcategory is provided, verify it belongs to the category
+    if (allocationData.subcategoryId) {
+      const subcategory = await storage.getExpenseSubcategoryById(allocationData.subcategoryId);
+      if (!subcategory || subcategory.categoryId !== allocationData.categoryId) {
         return res.status(403).json({ message: "Invalid subcategory" });
       }
     }
 
-    // Update income
-    const result = await pool.query(
-      `UPDATE incomes
-       SET amount=$1, description=$2, date=$3, category_id=$4, category_name=$5, subcategory_id=$6, source=$7, notes=$8
-       WHERE id=$9 AND user_id=$10
-       RETURNING *`,
-      [
-        incomeData.amount,
-        incomeData.description,
-        incomeData.date,
-        finalCategoryId,
-        finalCategoryName,
-        incomeData.subcategoryId,
-        incomeData.source,
-        incomeData.notes,
-        id,
-        userId
-      ]
-    );
+    // Get the old allocation for logging
+    const oldAllocation = await storage.getBudgetAllocations(allocationData.budgetId);
+    const currentAllocation = oldAllocation.find(a => a.id === id);
+    
+    const updatedAllocation = await storage.updateBudgetAllocation(id, allocationData);
 
-    if (result.rows.length === 0) return res.status(404).json({ message: "Income not found" });
+    // Log activity for budget allocation update
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'UPDATE',
+        resourceType: 'BUDGET_ALLOCATION',
+        resourceId: id,
+        description: `Updated "${category.name}" allocation in budget "${budget.name}" from ${(currentAllocation?.amount || 0).toLocaleString()} to ${allocationData.amount.toLocaleString()} FCFA`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          budgetName: budget.name,
+          categoryName: category.name,
+          oldAmount: currentAllocation?.amount || 0,
+          newAmount: allocationData.amount,
+          budgetId: budget.id,
+          categoryId: category.id
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget allocation update');
+    } catch (logError) {
+      console.error('Failed to log activity for budget allocation update:', logError);
+    }
 
-    res.json(result.rows[0]);
+    res.json(updatedAllocation);
   } catch (error) {
-    console.error("Error updating income:", error);
-    res.status(500).json({ message: "Failed to update income" });
+    if (error instanceof ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
+    } else {
+      console.error("Error updating budget allocation:", error);
+      res.status(500).json({ message: "Failed to update budget allocation" });
+    }
   }
 });
 
-
-  // Budget Routes
-  app.get("/api/budgets", requireAuth, async (req, res) => {
-    try {
-      const budgets = await storage.getBudgetsByUserId(req.user!.id);
-      
-      // Add performance data to each budget
-      const budgetsWithPerformance = await Promise.all(
-        budgets.map(async (budget) => {
-          const performance = await storage.getBudgetPerformance(budget.id);
-          return {
-            ...budget,
-            allocatedAmount: performance.allocated,
-            spentAmount: performance.spent,
-            remainingAmount: performance.remaining
-          };
-        })
-      );
-      
-      res.json(budgetsWithPerformance);
-    } catch (error) {
-      console.error("Error fetching budgets:", error);
-      res.status(500).json({ message: "Failed to fetch budgets" });
-    }
-  });
-
-  app.post("/api/budgets", requireAuth, async (req, res) => {
-    try {
-      // Ensure dates are properly parsed, especially if they came as ISO strings
-      const data = req.body;
-      if (data.startDate && typeof data.startDate === 'string') {
-        data.startDate = new Date(data.startDate);
-      }
-      if (data.endDate && typeof data.endDate === 'string') {
-        data.endDate = new Date(data.endDate);
-      }
-      
-      // Extract categoryIds before validation
-      const categoryIds = data.categoryIds;
-      delete data.categoryIds;
-      
-      const budgetData = insertBudgetSchema.parse(data);
-      const budget = await storage.createBudget({
-        ...budgetData,
-        userId: req.user!.id
-      });
-      
-      // If categories are provided, create budget allocations for them
-      if (categoryIds && Array.isArray(categoryIds) && categoryIds.length > 0) {
-        const budgetId = budget.id;
-        
-        // Verify all categories belong to the user
-        for (const categoryId of categoryIds) {
-          const category = await storage.getExpenseCategoryById(categoryId);
-          if (category && category.userId === req.user!.id) {
-            // Create an initial allocation with zero amount that can be updated later
-            await storage.createBudgetAllocation({
-              budgetId,
-              categoryId,
-              subcategoryId: null,
-              amount: 0
-            });
-          }
-        }
-      }
-      
-      res.status(201).json(budget);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error creating budget:", error);
-        res.status(500).json({ message: "Failed to create budget" });
-      }
-    }
-  });
-
-  app.get("/api/budgets/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const budget = await storage.getBudgetById(id);
-      
-      if (!budget) {
-        return res.status(404).json({ message: "Budget not found" });
-      }
-      
-      if (budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to access this budget" });
-      }
-      
-      // Get all budget allocations as well
-      const allocations = await storage.getBudgetAllocations(id);
-      
-      // Get budget performance
-      const performance = await storage.getBudgetPerformance(id);
-      
-      res.json({
-        budget,
-        allocations,
-        performance
-      });
-    } catch (error) {
-      console.error("Error fetching budget:", error);
-      res.status(500).json({ message: "Failed to fetch budget" });
-    }
-  });
-
-  app.patch("/api/budgets/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const budget = await storage.getBudgetById(id);
-      
-      if (!budget) {
-        return res.status(404).json({ message: "Budget not found" });
-      }
-      
-      if (budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to update this budget" });
-      }
-      
-      // Ensure dates are properly parsed, especially if they came as ISO strings
-      const data = req.body;
-      if (data.startDate && typeof data.startDate === 'string') {
-        data.startDate = new Date(data.startDate);
-      }
-      if (data.endDate && typeof data.endDate === 'string') {
-        data.endDate = new Date(data.endDate);
-      }
-      
-      const budgetData = insertBudgetSchema.parse(data);
-      const updatedBudget = await storage.updateBudget(id, budgetData);
-      
-      res.json(updatedBudget);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error updating budget:", error);
-        res.status(500).json({ message: "Failed to update budget" });
-      }
-    }
-  });
-
-  // PUT route for budget updates (same as PATCH)
-  app.put("/api/budgets/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const budget = await storage.getBudgetById(id);
-      
-      if (!budget) {
-        return res.status(404).json({ message: "Budget not found" });
-      }
-      
-      if (budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to update this budget" });
-      }
-      
-      // Ensure dates are properly parsed, especially if they came as ISO strings
-      const data = req.body;
-      if (data.startDate && typeof data.startDate === 'string') {
-        data.startDate = new Date(data.startDate);
-      }
-      if (data.endDate && typeof data.endDate === 'string') {
-        data.endDate = new Date(data.endDate);
-      }
-      
-      const budgetData = insertBudgetSchema.parse(data);
-      const updatedBudget = await storage.updateBudget(id, budgetData);
-      
-      res.json(updatedBudget);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error updating budget:", error);
-        res.status(500).json({ message: "Failed to update budget" });
-      }
-    }
-  });
-
-  app.delete("/api/budgets/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const budget = await storage.getBudgetById(id);
-      
-      if (!budget) {
-        return res.status(404).json({ message: "Budget not found" });
-      }
-      
-      if (budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to delete this budget" });
-      }
-      
-      await storage.deleteBudget(id);
-      res.status(204).send();
-    } catch (error) {
-      console.error("Error deleting budget:", error);
-      res.status(500).json({ message: "Failed to delete budget" });
-    }
-  });
-  
-  // -------------------------------------------------------------------------
-  // Budget Allocation Routes
-  // -------------------------------------------------------------------------
-  app.get("/api/budgets/:budgetId/allocations", requireAuth, async (req, res) => {
-    try {
-      const budgetId = parseInt(req.params.budgetId);
-      const budget = await storage.getBudgetById(budgetId);
-      
-      if (!budget) {
-        return res.status(404).json({ message: "Budget not found" });
-      }
-      
-      if (budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to access this budget" });
-      }
-      
-      const allocations = await storage.getBudgetAllocations(budgetId);
-      res.json(allocations);
-    } catch (error) {
-      console.error("Error fetching budget allocations:", error);
-      res.status(500).json({ message: "Failed to fetch budget allocations" });
-    }
-  });
-  
-  app.get("/api/budgets/:budgetId/performance", requireAuth, async (req, res) => {
-    try {
-      const budgetId = parseInt(req.params.budgetId);
-      const budget = await storage.getBudgetById(budgetId);
-      
-      if (!budget) {
-        return res.status(404).json({ message: "Budget not found" });
-      }
-      
-      if (budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "You don't have permission to access this budget" });
-      }
-      
-      const performance = await storage.getBudgetPerformance(budgetId);
-      res.json(performance);
-    } catch (error) {
-      console.error("Error fetching budget performance:", error);
-      res.status(500).json({ message: "Failed to fetch budget performance" });
-    }
-  });
-
-  // POST route for budget allocations (nested under budget)
-  app.post("/api/budgets/:budgetId/allocations", requireAuth, async (req, res) => {
-    try {
-      const budgetId = parseInt(req.params.budgetId);
-      const allocationData = insertBudgetAllocationSchema.parse(req.body);
-      
-      // Verify the budget belongs to the user
-      const budget = await storage.getBudgetById(budgetId);
-      if (!budget || budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid budget" });
-      }
-
-      // Ensure the budgetId matches
-      const finalAllocationData = {
-        ...allocationData,
-        budgetId: budgetId
-      };
-
-      const allocation = await storage.createBudgetAllocation(finalAllocationData);
-      res.status(201).json(allocation);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ message: "Invalid data", errors: error.errors });
-      } else {
-        console.error("Error creating budget allocation:", error);
-        res.status(500).json({ message: "Failed to create budget allocation" });
-      }
-    }
-  });
-
-  app.post("/api/budget-allocations", requireAuth, async (req, res) => {
-    try {
-      const allocationData = insertBudgetAllocationSchema.parse(req.body);
-      
-      // Verify the budget belongs to the user
-      const budget = await storage.getBudgetById(allocationData.budgetId);
-      if (!budget || budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid budget" });
-      }
-      
-      // Verify the category belongs to the user
-      const category = await storage.getExpenseCategoryById(allocationData.categoryId);
-      if (!category || category.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid category" });
-      }
-      
-      // If subcategory is provided, verify it belongs to the category
-      if (allocationData.subcategoryId) {
-        const subcategory = await storage.getExpenseSubcategoryById(allocationData.subcategoryId);
-        if (!subcategory || subcategory.categoryId !== allocationData.categoryId) {
-          return res.status(403).json({ message: "Invalid subcategory" });
-        }
-      }
-      
-      const allocation = await storage.createBudgetAllocation(allocationData);
-
-      // Log the budget allocation creation activity
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'CREATE',
-          resourceType: 'BUDGET_ALLOCATION',
-          resourceId: allocation.id,
-          description: ActivityDescriptions.createBudgetAllocation(budget.name, category.name, allocation.amount),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            budgetName: budget.name,
-            categoryName: category.name,
-            amount: allocation.amount,
-            budgetId: budget.id,
-            categoryId: category.id
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log budget allocation creation activity:', logError);
-      }
-
-      res.status(201).json(allocation);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error creating budget allocation:", error);
-        res.status(500).json({ message: "Failed to create budget allocation" });
-      }
-    }
-  });
-
-  app.patch("/api/budget-allocations/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const allocationData = insertBudgetAllocationSchema.parse(req.body);
-      
-      // Verify the budget belongs to the user
-      const budget = await storage.getBudgetById(allocationData.budgetId);
-      if (!budget || budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid budget" });
-      }
-      
-      // Verify the category belongs to the user
-      const category = await storage.getExpenseCategoryById(allocationData.categoryId);
-      if (!category || (!category.isSystem && category.userId !== req.user!.id)) {
-        return res.status(403).json({ message: "Invalid category" });
-      }
-      
-      // If subcategory is provided, verify it belongs to the category
-      if (allocationData.subcategoryId) {
-        const subcategory = await storage.getExpenseSubcategoryById(allocationData.subcategoryId);
-        if (!subcategory || subcategory.categoryId !== allocationData.categoryId) {
-          return res.status(403).json({ message: "Invalid subcategory" });
-        }
-      }
-
-       // Get the old allocation for logging
-      const oldAllocation = await storage.getBudgetAllocations(allocationData.budgetId);
-      const currentAllocation = oldAllocation.find(a => a.id === id);
-      
-      const updatedAllocation = await storage.updateBudgetAllocation(id, allocationData);
-
-      // Log the budget allocation update activity
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'UPDATE',
-          resourceType: 'BUDGET_ALLOCATION',
-          resourceId: id,
-          description: ActivityDescriptions.updateBudgetAllocation(
-            budget.name, 
-            category.name, 
-            currentAllocation?.amount || 0, 
-            allocationData.amount
-          ),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            budgetName: budget.name,
-            categoryName: category.name,
-            oldAmount: currentAllocation?.amount || 0,
-            newAmount: allocationData.amount,
-            budgetId: budget.id,
-            categoryId: category.id
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log budget allocation update activity:', logError);
-      }
-
-      res.json(updatedAllocation);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        console.error("Error updating budget allocation:", error);
-        res.status(500).json({ message: "Failed to update budget allocation" });
-      }
-    }
-  });
-
-   app.delete("/api/budget-allocations/:id", requireAuth, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      
-      // Get allocation details before deletion for logging
-      const budgets = await storage.getBudgetsByUserId(req.user!.id);
-      let allocationToDelete = null;
-      let budgetName = '';
-      let categoryName = '';
-      
-      for (const budget of budgets) {
-        const allocations = await storage.getBudgetAllocations(budget.id);
-        const allocation = allocations.find(a => a.id === id);
-        if (allocation) {
-          allocationToDelete = allocation;
-          budgetName = budget.name;
-           // ✅ SAFE: look up the category name by categoryId instead of reading allocation.categoryName
+app.delete("/api/budget-allocations/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    
+    // Get allocation details before deletion for logging
+    const budgets = await storage.getBudgetsByUserId(req.user!.id);
+    let allocationToDelete = null;
+    let budgetName = '';
+    let categoryName = '';
+    
+    for (const budget of budgets) {
+      const allocations = await storage.getBudgetAllocations(budget.id);
+      const allocation = allocations.find(a => a.id === id);
+      if (allocation) {
+        allocationToDelete = allocation;
+        budgetName = budget.name;
+        // ✅ SAFE: look up the category name by categoryId instead of reading allocation.categoryName
         if (allocation.categoryId) {
           const cat = await storage.getExpenseCategoryById(allocation.categoryId);
           categoryName = cat?.name ?? 'Unknown';
         } else {
           categoryName = 'Unknown';
         }
-
         break;
-        }
       }
-      
-      await storage.deleteBudgetAllocation(id);
-      
-      // Log the budget allocation deletion activity
-      if (allocationToDelete) {
-        try {
-          const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-          await logActivity({
-            userId: req.user!.id,
-            actionType: 'DELETE',
-            resourceType: 'BUDGET_ALLOCATION',
-            resourceId: id,
-            description: ActivityDescriptions.deleteBudgetAllocation(budgetName, categoryName, allocationToDelete.amount),
-            ipAddress: req.ip || req.connection.remoteAddress,
-            userAgent: req.headers['user-agent'],
-            metadata: { 
-              budgetName: budgetName,
-              categoryName: categoryName,
-              amount: allocationToDelete.amount,
-              budgetId: allocationToDelete.budgetId,
-              categoryId: allocationToDelete.categoryId
-            }
-          });
-        } catch (logError) {
-          console.error('Failed to log budget allocation deletion activity:', logError);
-        }
-      }
-      
-      res.status(204).send();
-    } catch (error) {
-      console.error("Error deleting budget allocation:", error);
-      res.status(500).json({ message: "Failed to delete budget allocation" });
     }
-  });
-  
-  // -------------------------------------------------------------------------
-  // Reports and Analytics Routes
-  // -------------------------------------------------------------------------
-  app.get("/api/reports/monthly-expenses/:year", requireAuth, async (req, res) => {
-    try {
-      const year = parseInt(req.params.year);
-      const monthlyExpenses = await storage.getMonthlyExpenseTotals(req.user!.id, year);
-      
-      // Log activity for viewing monthly expense report
+    
+    await storage.deleteBudgetAllocation(id);
+    
+    // Log activity for budget allocation deletion
+    if (allocationToDelete) {
       try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
         await logActivity({
           userId: req.user!.id,
-          actionType: 'VIEW',
-          resourceType: 'REPORT',
-          description: ActivityDescriptions.viewMonthlyExpenseReport(year),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
+          actionType: 'DELETE',
+          resourceType: 'BUDGET_ALLOCATION',
+          resourceId: id,
+          description: `Removed ${allocationToDelete.amount.toLocaleString()} FCFA allocation for "${categoryName}" from budget "${budgetName}"`,
+          ipAddress: req.ip,
+          userAgent: req.get('User-Agent'),
           metadata: { 
-            reportType: 'monthly-expenses',
-            year: year,
-            recordCount: monthlyExpenses.length
+            budgetName: budgetName,
+            categoryName: categoryName,
+            amount: allocationToDelete.amount,
+            budgetId: allocationToDelete.budgetId,
+            categoryId: allocationToDelete.categoryId
           }
         });
+        console.log('[DEBUG] Activity logged for budget allocation deletion');
       } catch (logError) {
-        console.error('Failed to log monthly expense report activity:', logError);
+        console.error('Failed to log activity for budget allocation deletion:', logError);
       }
-      
-      res.json(monthlyExpenses);
-    } catch (error) {
-      console.error("Error fetching monthly expense report:", error);
-      res.status(500).json({ message: "Failed to fetch monthly expense report" });
     }
-  });
-  
-  app.get("/api/reports/category-expenses", requireAuth, async (req, res) => {
-    try {
-      const { startDate, endDate } = req.query;
-      
-      if (!startDate || !endDate) {
-        return res.status(400).json({ message: "Start date and end date are required" });
-      }
-      
-      const start = new Date(startDate as string);
-      const end = new Date(endDate as string);
-      
-      const categoryExpenses = await storage.getCategoryExpenseTotals(req.user!.id, start, end);
-      
-      // Log activity for viewing category expense report
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'VIEW',
-          resourceType: 'REPORT',
-          description: ActivityDescriptions.viewCategoryExpenseReport(),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            reportType: 'category-expenses',
-            startDate: start.toISOString(),
-            endDate: end.toISOString(),
-            categoriesCount: categoryExpenses.length
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log category expense report activity:', logError);
-      }
-      
-      res.json(categoryExpenses);
-    } catch (error) {
-      console.error("Error fetching category expense report:", error);
-      res.status(500).json({ message: "Failed to fetch category expense report" });
-    }
-  });
-  
-  app.get("/api/reports/monthly-incomes/:year", requireAuth, async (req, res) => {
-    try {
-      const year = parseInt(req.params.year);
-      const monthlyIncomes = await storage.getMonthlyIncomeTotals(req.user!.id, year);
-      
-      // Log activity for viewing monthly income report
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'VIEW',
-          resourceType: 'REPORT',
-          description: ActivityDescriptions.viewMonthlyIncomeReport(year),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            reportType: 'monthly-incomes',
-            year: year,
-            recordCount: monthlyIncomes.length
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log monthly income report activity:', logError);
-      }
-      
-      res.json(monthlyIncomes);
-    } catch (error) {
-      console.error("Error fetching monthly income report:", error);
-      res.status(500).json({ message: "Failed to fetch monthly income report" });
-    }
-  });
-  
-  app.get("/api/reports/category-incomes", requireAuth, async (req, res) => {
-    try {
-      const { startDate, endDate } = req.query;
-      
-      if (!startDate || !endDate) {
-        return res.status(400).json({ message: "Start date and end date are required" });
-      }
-      
-      const start = new Date(startDate as string);
-      const end = new Date(endDate as string);
-      
-      const categoryIncomes = await storage.getCategoryIncomeTotals(req.user!.id, start, end);
-      
-      // Log activity for viewing category income report
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'VIEW',
-          resourceType: 'REPORT',
-          description: ActivityDescriptions.viewCategoryIncomeReport(),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            reportType: 'category-incomes',
-            startDate: start.toISOString(),
-            endDate: end.toISOString(),
-            categoriesCount: categoryIncomes.length
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log category income report activity:', logError);
-      }
-      
-      res.json(categoryIncomes);
-    } catch (error) {
-      console.error("Error fetching category income report:", error);
-      res.status(500).json({ message: "Failed to fetch category income report" });
-    }
-  });
-  
-  app.get("/api/reports/budget-performance/:budgetId", requireAuth, async (req, res) => {
-    try {
-      const budgetId = parseInt(req.params.budgetId);
-      
-      // Verify the budget belongs to the user
-      const budget = await storage.getBudgetById(budgetId);
-      if (!budget || budget.userId !== req.user!.id) {
-        return res.status(403).json({ message: "Invalid budget" });
-      }
-      
-      const performance = await storage.getBudgetPerformance(budgetId);
-      
-      // Log activity for viewing budget performance report
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'VIEW',
-          resourceType: 'REPORT',
-          resourceId: budgetId,
-          description: ActivityDescriptions.viewBudgetPerformanceReport(budget.name),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            reportType: 'budget-performance',
-            budgetId: budgetId,
-            budgetName: budget.name,
-            performance: performance
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log budget performance report activity:', logError);
-      }
-      
-      res.json(performance);
-    } catch (error) {
-      console.error("Error fetching budget performance:", error);
-      res.status(500).json({ message: "Failed to fetch budget performance" });
-    }
-  });
-  
-  
-  // -------------------------------------------------------------------------
-  // User settings routes
-  // -------------------------------------------------------------------------
-   app.patch("/api/user/settings", requireAuth, async (req, res) => {
-    try {
-      const { currency } = req.body;
-      const oldCurrency = req.user!.currency;
-      
-      console.log(`[DEBUG] Currency update request:`, {
-        userId: req.user!.id,
-        username: req.user!.username,
-        oldCurrency,
-        newCurrency: currency,
-        timestamp: new Date().toISOString()
-      });
-      
-      const updatedUser = await storage.updateUserSettings(req.user!.id, { currency });
-      
-      console.log(`[DEBUG] Currency updated successfully:`, {
-        userId: req.user!.id,
-        updatedCurrency: updatedUser.currency,
-        confirmed: updatedUser.currency === currency
-      });
-      
-      // Log activity for updating user settings
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'UPDATE',
-          resourceType: 'SETTINGS',
-          description: ActivityDescriptions.updateUserSettings('currency', oldCurrency, currency),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            settingType: 'currency',
-            oldValue: oldCurrency,
-            newValue: currency
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log user settings update activity:', logError);
-      }
-      
-      const { password, ...userWithoutPassword } = updatedUser;
-      res.json(userWithoutPassword);
-    } catch (error) {
-      console.error("Error updating user settings:", error);
-      res.status(500).json({ message: "Failed to update user settings" });
-    }
-  });
-
-  // Update user profile information
-  app.patch("/api/user/profile", requireAuth, async (req, res) => {
-    try {
-      const { name, email } = req.body;
-      const oldName = req.user!.name;
-      const oldEmail = req.user!.email;
-      
-      // For now, we'll just log the activity without updating the database
-      // In a real implementation, you would update the user in the database
-      
-      // Log activity for profile updates
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        
-        if (name && name !== oldName) {
-          await logActivity({
-            userId: req.user!.id,
-            actionType: 'UPDATE',
-            resourceType: 'SETTINGS',
-            description: ActivityDescriptions.updateProfileInfo('name', name),
-            ipAddress: req.ip || req.connection.remoteAddress,
-            userAgent: req.headers['user-agent'],
-            metadata: { 
-              settingType: 'profile-name',
-              oldValue: oldName,
-              newValue: name
-            }
-          });
-        }
-        
-        if (email && email !== oldEmail) {
-          await logActivity({
-            userId: req.user!.id,
-            actionType: 'UPDATE',
-            resourceType: 'SETTINGS',
-            description: ActivityDescriptions.updateProfileInfo('email', email),
-            ipAddress: req.ip || req.connection.remoteAddress,
-            userAgent: req.headers['user-agent'],
-            metadata: { 
-              settingType: 'profile-email',
-              oldValue: oldEmail,
-              newValue: email
-            }
-          });
-        }
-      } catch (logError) {
-        console.error('Failed to log profile update activity:', logError);
-      }
-      
-      // Return success response
-      res.json({ message: 'Profile updated successfully', name, email });
-    } catch (error) {
-      console.error("Error updating user profile:", error);
-      res.status(500).json({ message: "Failed to update user profile" });
-    }
-  });
-
-  // Update notification settings
-  app.patch("/api/user/notifications", requireAuth, async (req, res) => {
-    try {
-      const { emailNotifications, monthlyReport, budgetAlerts } = req.body;
-      
-      // Log activity for each notification setting change
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        
-        const settingChanges = [
-          { key: 'emailNotifications', value: emailNotifications, label: 'Email' },
-          { key: 'monthlyReport', value: monthlyReport, label: 'Monthly Report' },
-          { key: 'budgetAlerts', value: budgetAlerts, label: 'Budget Alerts' }
-        ];
-        
-        for (const setting of settingChanges) {
-          if (setting.value !== undefined) {
-            await logActivity({
-              userId: req.user!.id,
-              actionType: 'UPDATE',
-              resourceType: 'SETTINGS',
-              description: ActivityDescriptions.updateNotificationSetting(setting.label, setting.value),
-              ipAddress: req.ip || req.connection.remoteAddress,
-              userAgent: req.headers['user-agent'],
-              metadata: { 
-                settingType: `notification-${setting.key}`,
-                newValue: setting.value,
-                settingName: setting.label
-              }
-            });
-          }
-        }
-      } catch (logError) {
-        console.error('Failed to log notification settings update activity:', logError);
-      }
-      
-      res.json({ 
-        message: 'Notification settings updated successfully',
-        emailNotifications,
-        monthlyReport,
-        budgetAlerts
-      });
-    } catch (error) {
-      console.error("Error updating notification settings:", error);
-      res.status(500).json({ message: "Failed to update notification settings" });
-    }
-  });
-
-  // Log account actions (like logout)
-  app.post("/api/user/account-action", requireAuth, async (req, res) => {
-    try {
-      const { action, metadata } = req.body;
-      
-      // Log the account action
-      try {
-        const { logActivity, ActivityDescriptions } = await import('./activity-loggers');
-        await logActivity({
-          userId: req.user!.id,
-          actionType: 'UPDATE',
-          resourceType: 'SETTINGS',
-          description: ActivityDescriptions.performAccountAction(action),
-          ipAddress: req.ip || req.connection.remoteAddress,
-          userAgent: req.headers['user-agent'],
-          metadata: { 
-            actionType: action,
-            ...metadata
-          }
-        });
-      } catch (logError) {
-        console.error('Failed to log account action activity:', logError);
-      }
-      
-      res.json({ message: `Account action "${action}" logged successfully` });
-    } catch (error) {
-      console.error("Error logging account action:", error);
-      res.status(500).json({ message: "Failed to log account action" });
-    }
-  });
-  
-  // -------------------------------------------------------------------------
-  // Admin routes
-  // -------------------------------------------------------------------------
-  app.get("/api/admin/users", requireAdmin, async (req, res) => {
-    try {
-      const users = await storage.getAllUsers();
-      // Remove passwords from response
-      const safeUsers = users.map(({ password, ...user }) => ({
-        ...user,
-        role: storage.getUserRole(user.id)
-      }));
-      
-      res.json(safeUsers);
-    } catch (error) {
-      console.error("Error fetching users:", error);
-      res.status(500).json({ message: "Failed to fetch users" });
-    }
-  });
-  
-  app.get("/api/admin/expenses", requireAdmin, async (req, res) => {
-    try {
-      const expenses = await storage.getAllExpenses();
-      res.json(expenses);
-    } catch (error) {
-      console.error("Error fetching all expenses:", error);
-      res.status(500).json({ message: "Failed to fetch expenses" });
-    }
-  });
-  
-  app.get("/api/admin/incomes", requireAdmin, async (req, res) => {
-    try {
-      const incomes = await storage.getAllIncomes();
-      res.json(incomes);
-    } catch (error) {
-      console.error("Error fetching all incomes:", error);
-      res.status(500).json({ message: "Failed to fetch incomes" });
-    }
-  });
-  
-  app.get("/api/admin/budgets", requireAdmin, async (req, res) => {
-    try {
-      // Collect all budgets from all users
-      const users = await storage.getAllUsers();
-      const allBudgets = [];
-      
-      for (const user of users) {
-        const budgets = await storage.getBudgetsByUserId(user.id);
-        // Add user information to each budget
-        const augmentedBudgets = budgets.map(budget => ({
-          ...budget,
-          userName: user.name,
-          userEmail: user.email
-        }));
-        allBudgets.push(...augmentedBudgets);
-      }
-      
-      res.json(allBudgets);
-    } catch (error) {
-      console.error("Error fetching all budgets:", error);
-      res.status(500).json({ message: "Failed to fetch budgets" });
-    }
-  });
-  
-  app.patch("/api/admin/users/:id/role", requireAdmin, async (req, res) => {
-    try {
-      const userId = parseInt(req.params.id);
-      const { role } = req.body;
-      
-      if (!role || !['admin', 'user'].includes(role)) {
-        return res.status(400).json({ message: "Invalid role" });
-      }
-      
-      await storage.setUserRole(userId, role);
-      res.status(200).json({ message: "User role updated" });
-    } catch (error) {
-      console.error("Error updating user role:", error);
-      res.status(500).json({ message: "Failed to update user role" });
-    }
-  });
-  
-  // Delete user endpoint for administrators
-  app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
-    try {
-      const userId = parseInt(req.params.id);
-      
-      // Check if user exists
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(404).json({ message: "User not found" });
-      }
-      
-      // Prevent deleting your own account
-      if (userId === req.user!.id) {
-        return res.status(400).json({ message: "Cannot delete your own account" });
-      }
-      
-      // Here we would implement user deletion
-      // For now, we'll just return a success message
-      // In a real implementation, this would include:
-      // 1. Deleting user's expenses
-      // 2. Deleting user's incomes
-      // 3. Deleting user's budgets
-      // 4. Deleting user's categories
-      // 5. Finally deleting the user
-      
-      res.status(200).json({ message: "User deleted successfully" });
-    } catch (error) {
-      console.error("Error deleting user:", error);
-      res.status(500).json({ message: "Failed to delete user" });
-    }
-  });
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting budget allocation:", error);
+    res.status(500).json({ message: "Failed to delete budget allocation" });
+  }
+});
 
   // -------------------------------------------------------------------------
-  // Activity Log Routes
-  // -------------------------------------------------------------------------
-  
-  // Create activity log entry (for client-side logging)
-  app.post("/api/activity-logs", requireAuth, async (req, res) => {
+// Reports and Analytics Routes
+// -------------------------------------------------------------------------
+app.get("/api/reports/monthly-expenses/:year", requireAuth, async (req, res) => {
+  try {
+    const year = parseInt(req.params.year);
+    const monthlyExpenses = await storage.getMonthlyExpenseTotals(req.user!.id, year);
+    
+    // Log activity for viewing monthly expense report
     try {
-      const { actionType, resourceType, resourceId, description, metadata } = req.body;
-      
-      const { logActivity } = await import('./activity-loggers');
       await logActivity({
         userId: req.user!.id,
-        actionType,
-        resourceType,
-        resourceId,
-        description,
-        ipAddress: req.ip || req.connection.remoteAddress,
-        userAgent: req.headers['user-agent'],
-        metadata
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Viewed monthly expense report for ${year}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          reportType: 'monthly-expenses',
+          year: year,
+          recordCount: monthlyExpenses.length
+        }
       });
-      
-      res.status(201).json({ message: 'Activity logged successfully' });
-    } catch (error) {
-      console.error('Error creating activity log:', error);
-      res.status(500).json({ message: 'Failed to create activity log' });
+      console.log('[DEBUG] Activity logged for monthly expense report view');
+    } catch (logError) {
+      console.error('Failed to log monthly expense report activity:', logError);
     }
-  });
+    
+    res.json(monthlyExpenses);
+  } catch (error) {
+    console.error("Error fetching monthly expense report:", error);
+    res.status(500).json({ message: "Failed to fetch monthly expense report" });
+  }
+});
+
+app.get("/api/reports/category-expenses", requireAuth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: "Start date and end date are required" });
+    }
+    
+    const start = new Date(startDate as string);
+    const end = new Date(endDate as string);
+    
+    const categoryExpenses = await storage.getCategoryExpenseTotals(req.user!.id, start, end);
+    
+    // Log activity for viewing category expense report
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Viewed expense breakdown by category`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          reportType: 'category-expenses',
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          categoriesCount: categoryExpenses.length
+        }
+      });
+      console.log('[DEBUG] Activity logged for category expense report view');
+    } catch (logError) {
+      console.error('Failed to log category expense report activity:', logError);
+    }
+    
+    res.json(categoryExpenses);
+  } catch (error) {
+    console.error("Error fetching category expense report:", error);
+    res.status(500).json({ message: "Failed to fetch category expense report" });
+  }
+});
+
+app.get("/api/reports/monthly-incomes/:year", requireAuth, async (req, res) => {
+  try {
+    const year = parseInt(req.params.year);
+    const monthlyIncomes = await storage.getMonthlyIncomeTotals(req.user!.id, year);
+    
+    // Log activity for viewing monthly income report
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Viewed monthly income report for ${year}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          reportType: 'monthly-incomes',
+          year: year,
+          recordCount: monthlyIncomes.length
+        }
+      });
+      console.log('[DEBUG] Activity logged for monthly income report view');
+    } catch (logError) {
+      console.error('Failed to log monthly income report activity:', logError);
+    }
+    
+    res.json(monthlyIncomes);
+  } catch (error) {
+    console.error("Error fetching monthly income report:", error);
+    res.status(500).json({ message: "Failed to fetch monthly income report" });
+  }
+});
+
+app.get("/api/reports/category-incomes", requireAuth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: "Start date and end date are required" });
+    }
+    
+    const start = new Date(startDate as string);
+    const end = new Date(endDate as string);
+    
+    const categoryIncomes = await storage.getCategoryIncomeTotals(req.user!.id, start, end);
+    
+    // Log activity for viewing category income report
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Viewed income breakdown by category`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          reportType: 'category-incomes',
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          categoriesCount: categoryIncomes.length
+        }
+      });
+      console.log('[DEBUG] Activity logged for category income report view');
+    } catch (logError) {
+      console.error('Failed to log category income report activity:', logError);
+    }
+    
+    res.json(categoryIncomes);
+  } catch (error) {
+    console.error("Error fetching category income report:", error);
+    res.status(500).json({ message: "Failed to fetch category income report" });
+  }
+});
+
+app.get("/api/reports/budget-performance/:budgetId", requireAuth, async (req, res) => {
+  try {
+    const budgetId = parseInt(req.params.budgetId);
+    
+    // Verify the budget belongs to the user
+    const budget = await storage.getBudgetById(budgetId);
+    if (!budget || budget.userId !== req.user!.id) {
+      return res.status(403).json({ message: "Invalid budget" });
+    }
+    
+    const performance = await storage.getBudgetPerformance(budgetId);
+    
+    // Log activity for viewing budget performance report
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        resourceId: budgetId,
+        description: `Viewed budget performance report for "${budget.name}"`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          reportType: 'budget-performance',
+          budgetId: budgetId,
+          budgetName: budget.name,
+          performance: performance
+        }
+      });
+      console.log('[DEBUG] Activity logged for budget performance report view');
+    } catch (logError) {
+      console.error('Failed to log budget performance report activity:', logError);
+    }
+    
+    res.json(performance);
+  } catch (error) {
+    console.error("Error fetching budget performance:", error);
+    res.status(500).json({ message: "Failed to fetch budget performance" });
+  }
+});
   
-  app.get("/api/activity-logs", requireAuth, async (req, res) => {
+// -------------------------------------------------------------------------
+// User settings routes
+// -------------------------------------------------------------------------
+app.patch("/api/user/settings", requireAuth, async (req, res) => {
+  try {
+    const { currency } = req.body;
+    const oldCurrency = req.user!.currency;
+    
+    console.log(`[DEBUG] Currency update request:`, {
+      userId: req.user!.id,
+      username: req.user!.username,
+      oldCurrency,
+      newCurrency: currency,
+      timestamp: new Date().toISOString()
+    });
+    
+    const updatedUser = await storage.updateUserSettings(req.user!.id, { currency });
+    
+    console.log(`[DEBUG] Currency updated successfully:`, {
+      userId: req.user!.id,
+      updatedCurrency: updatedUser.currency,
+      confirmed: updatedUser.currency === currency
+    });
+    
+    // Log activity for updating user settings
     try {
-      const userId = req.user!.id;
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 100); // Max 100 per request
-      const offset = (page - 1) * limit;
-      
-      // Search/filter parameters
-      const searchQuery = req.query.search as string || '';
-      const actionType = req.query.actionType as string || '';
-      const resourceType = req.query.resourceType as string || '';
-      const fromDate = req.query.fromDate as string || '';
-      const toDate = req.query.toDate as string || '';
-      
-      // Debug logging
-      console.log(`[DEBUG] Activity logs search - userId: ${userId}, searchQuery: "${searchQuery}", actionType: "${actionType}", resourceType: "${resourceType}"`);
-      
-      // Check if user is admin with user_id = 14
-      const isAdmin = userId === 14;
-      const targetUserId = isAdmin ? (req.query.userId ? parseInt(req.query.userId as string) : null) : userId;
-
-      const { getUserActivityLogs, getUserActivityLogsCount, getAllUsersActivityLogs, getAllUsersActivityLogsCount } = await import('./activity-loggers');
-      
-      let logs, totalCount;
-      
-      const filterOptions = {
-        searchQuery,
-        actionType,
-        resourceType,
-        fromDate,
-        toDate
-      };
-      
-      if (isAdmin && !targetUserId) {
-        // Admin viewing all users' activities
-        [logs, totalCount] = await Promise.all([
-          getAllUsersActivityLogs(limit, offset, filterOptions),
-          getAllUsersActivityLogsCount(filterOptions)
-        ]);
-      } else {
-        // Regular user viewing their own activities, or admin viewing specific user
-        const userIdToQuery = targetUserId || userId;
-        [logs, totalCount] = await Promise.all([
-          getUserActivityLogs(userIdToQuery, limit, offset, filterOptions),
-          getUserActivityLogsCount(userIdToQuery, filterOptions)
-        ]);
-      }
-
-      res.json({
-        logs,
-        pagination: {
-          page,
-          limit,
-          totalCount,
-          totalPages: Math.ceil(totalCount / limit)
-        },
-        isAdmin,
-        currentUserId: userId
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'UPDATE',
+        resourceType: 'SETTINGS',
+        description: `Updated currency from ${oldCurrency} to ${currency}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          settingType: 'currency',
+          oldValue: oldCurrency,
+          newValue: currency
+        }
       });
-    } catch (error) {
-      console.error("Error fetching activity logs:", error);
-      res.status(500).json({ message: "Failed to fetch activity logs" });
+      console.log('[DEBUG] Activity logged for currency settings update');
+    } catch (logError) {
+      console.error('Failed to log user settings update activity:', logError);
     }
-  });
+    
+    const { password, ...userWithoutPassword } = updatedUser;
+    res.json(userWithoutPassword);
+  } catch (error) {
+    console.error("Error updating user settings:", error);
+    res.status(500).json({ message: "Failed to update user settings" });
+  }
+});
 
-  // Delete a specific activity log entry
-  app.delete("/api/activity-logs/:id", requireAuth, async (req, res) => {
+// Update user profile information
+app.patch("/api/user/profile", requireAuth, async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    const oldName = req.user!.name;
+    const oldEmail = req.user!.email;
+    
+    // For now, we'll just log the activity without updating the database
+    // In a real implementation, you would update the user in the database
+    
+    // Log activity for profile updates
     try {
-      const id = parseInt(req.params.id);
-      const userId = req.user!.id;
-      
-      // Ensure the activity log belongs to the user
-      const logCheck = await pool.query('SELECT id FROM activity_log WHERE id = $1 AND user_id = $2', [id, userId]);
-      if (logCheck.rowCount === 0) {
-        return res.status(404).json({ message: "Activity log not found" });
+      if (name && name !== oldName) {
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'UPDATE',
+          resourceType: 'SETTINGS',
+          description: `Updated profile name to "${name}"`,
+          ipAddress: req.ip,
+          userAgent: req.get('User-Agent'),
+          metadata: { 
+            settingType: 'profile-name',
+            oldValue: oldName,
+            newValue: name
+          }
+        });
+        console.log('[DEBUG] Activity logged for profile name update');
       }
       
-      await pool.query('DELETE FROM activity_log WHERE id = $1 AND user_id = $2', [id, userId]);
-      res.status(204).send();
-    } catch (error) {
-      console.error("Error deleting activity log:", error);
-      res.status(500).json({ message: "Failed to delete activity log" });
+      if (email && email !== oldEmail) {
+        await logActivity({
+          userId: req.user!.id,
+          actionType: 'UPDATE',
+          resourceType: 'SETTINGS',
+          description: `Updated profile email to "${email}"`,
+          ipAddress: req.ip,
+          userAgent: req.get('User-Agent'),
+          metadata: { 
+            settingType: 'profile-email',
+            oldValue: oldEmail,
+            newValue: email
+          }
+        });
+        console.log('[DEBUG] Activity logged for profile email update');
+      }
+    } catch (logError) {
+      console.error('Failed to log profile update activity:', logError);
     }
-  });
+    
+    // Return success response
+    res.json({ message: 'Profile updated successfully', name, email });
+  } catch (error) {
+    console.error("Error updating user profile:", error);
+    res.status(500).json({ message: "Failed to update user profile" });
+  }
+});
 
-  // Clear all activity logs for the current user
-  app.delete("/api/activity-logs", requireAuth, async (req, res) => {
+// Update notification settings
+app.patch("/api/user/notifications", requireAuth, async (req, res) => {
+  try {
+    const { emailNotifications, monthlyReport, budgetAlerts } = req.body;
+    
+    // Log activity for each notification setting change
     try {
-      const userId = req.user!.id;
-      const result = await pool.query('DELETE FROM activity_log WHERE user_id = $1', [userId]);
+      const settingChanges = [
+        { key: 'emailNotifications', value: emailNotifications, label: 'Email' },
+        { key: 'monthlyReport', value: monthlyReport, label: 'Monthly Report' },
+        { key: 'budgetAlerts', value: budgetAlerts, label: 'Budget Alerts' }
+      ];
       
-      res.json({ 
-        message: "All activity history cleared successfully",
-        deletedCount: result.rowCount 
-      });
-    } catch (error) {
-      console.error("Error clearing activity logs:", error);
-      res.status(500).json({ message: "Failed to clear activity history" });
+      for (const setting of settingChanges) {
+        if (setting.value !== undefined) {
+          await logActivity({
+            userId: req.user!.id,
+            actionType: 'UPDATE',
+            resourceType: 'SETTINGS',
+            description: `${setting.value ? 'Enabled' : 'Disabled'} ${setting.label} notifications`,
+            ipAddress: req.ip,
+            userAgent: req.get('User-Agent'),
+            metadata: { 
+              settingType: `notification-${setting.key}`,
+              newValue: setting.value,
+              settingName: setting.label
+            }
+          });
+          console.log(`[DEBUG] Activity logged for ${setting.label} notification setting`);
+        }
+      }
+    } catch (logError) {
+      console.error('Failed to log notification settings update activity:', logError);
     }
-  });
+    
+    res.json({ 
+      message: 'Notification settings updated successfully',
+      emailNotifications,
+      monthlyReport,
+      budgetAlerts
+    });
+  } catch (error) {
+    console.error("Error updating notification settings:", error);
+    res.status(500).json({ message: "Failed to update notification settings" });
+  }
+});
 
-  app.get("/api/expenses/total-this-month", requireAuth, async (req, res) => {
+// Log account actions (like logout)
+app.post("/api/user/account-action", requireAuth, async (req, res) => {
+  try {
+    const { action, metadata } = req.body;
+    
+    // Log the account action
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'UPDATE',
+        resourceType: 'SETTINGS',
+        description: `Performed account action: ${action}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          actionType: action,
+          ...metadata
+        }
+      });
+      console.log('[DEBUG] Activity logged for account action');
+    } catch (logError) {
+      console.error('Failed to log account action activity:', logError);
+    }
+    
+    res.json({ message: `Account action "${action}" logged successfully` });
+  } catch (error) {
+    console.error("Error logging account action:", error);
+    res.status(500).json({ message: "Failed to log account action" });
+  }
+});
+  
+  // -------------------------------------------------------------------------
+// Admin routes
+// -------------------------------------------------------------------------
+app.get("/api/admin/users", requireAdmin, async (req, res) => {
+  try {
+    const users = await storage.getAllUsers();
+    // Remove passwords from response
+    const safeUsers = users.map(({ password, ...user }) => ({
+      ...user,
+      role: storage.getUserRole(user.id)
+    }));
+    
+    // Log activity for admin viewing users
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'USER',
+        description: `Admin viewed all users (${safeUsers.length} users)`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          adminAction: 'view-users',
+          userCount: safeUsers.length
+        }
+      });
+      console.log('[DEBUG] Activity logged for admin viewing users');
+    } catch (logError) {
+      console.error('Failed to log admin view users activity:', logError);
+    }
+    
+    res.json(safeUsers);
+  } catch (error) {
+    console.error("Error fetching users:", error);
+    res.status(500).json({ message: "Failed to fetch users" });
+  }
+});
+
+app.get("/api/admin/expenses", requireAdmin, async (req, res) => {
+  try {
+    const expenses = await storage.getAllExpenses();
+    
+    // Log activity for admin viewing all expenses
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Admin viewed all expenses (${expenses.length} expenses)`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          adminAction: 'view-all-expenses',
+          expenseCount: expenses.length
+        }
+      });
+      console.log('[DEBUG] Activity logged for admin viewing all expenses');
+    } catch (logError) {
+      console.error('Failed to log admin view expenses activity:', logError);
+    }
+    
+    res.json(expenses);
+  } catch (error) {
+    console.error("Error fetching all expenses:", error);
+    res.status(500).json({ message: "Failed to fetch expenses" });
+  }
+});
+
+app.get("/api/admin/incomes", requireAdmin, async (req, res) => {
+  try {
+    const incomes = await storage.getAllIncomes();
+    
+    // Log activity for admin viewing all incomes
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Admin viewed all incomes (${incomes.length} incomes)`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          adminAction: 'view-all-incomes',
+          incomeCount: incomes.length
+        }
+      });
+      console.log('[DEBUG] Activity logged for admin viewing all incomes');
+    } catch (logError) {
+      console.error('Failed to log admin view incomes activity:', logError);
+    }
+    
+    res.json(incomes);
+  } catch (error) {
+    console.error("Error fetching all incomes:", error);
+    res.status(500).json({ message: "Failed to fetch incomes" });
+  }
+});
+
+app.get("/api/admin/budgets", requireAdmin, async (req, res) => {
+  try {
+    // Collect all budgets from all users
+    const users = await storage.getAllUsers();
+    const allBudgets = [];
+    
+    for (const user of users) {
+      const budgets = await storage.getBudgetsByUserId(user.id);
+      // Add user information to each budget
+      const augmentedBudgets = budgets.map(budget => ({
+        ...budget,
+        userName: user.name,
+        userEmail: user.email
+      }));
+      allBudgets.push(...augmentedBudgets);
+    }
+    
+    // Log activity for admin viewing all budgets
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Admin viewed all budgets (${allBudgets.length} budgets from ${users.length} users)`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          adminAction: 'view-all-budgets',
+          budgetCount: allBudgets.length,
+          userCount: users.length
+        }
+      });
+      console.log('[DEBUG] Activity logged for admin viewing all budgets');
+    } catch (logError) {
+      console.error('Failed to log admin view budgets activity:', logError);
+    }
+    
+    res.json(allBudgets);
+  } catch (error) {
+    console.error("Error fetching all budgets:", error);
+    res.status(500).json({ message: "Failed to fetch budgets" });
+  }
+});
+
+app.patch("/api/admin/users/:id/role", requireAdmin, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const { role } = req.body;
+    
+    if (!role || !['admin', 'user'].includes(role)) {
+      return res.status(400).json({ message: "Invalid role" });
+    }
+    
+    // Get user info for logging
+    const user = await storage.getUser(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    
+    const oldRole = await storage.getUserRole(userId);
+    
+    await storage.setUserRole(userId, role);
+    
+    // Log activity for admin updating user role
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'UPDATE',
+        resourceType: 'USER',
+        resourceId: userId,
+        description: `Admin updated user role for "${user.username}" from ${oldRole} to ${role}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          adminAction: 'update-user-role',
+          targetUserId: userId,
+          targetUsername: user.username,
+          oldRole: oldRole,
+          newRole: role
+        }
+      });
+      console.log('[DEBUG] Activity logged for admin updating user role');
+    } catch (logError) {
+      console.error('Failed to log admin update user role activity:', logError);
+    }
+    
+    res.status(200).json({ message: "User role updated" });
+  } catch (error) {
+    console.error("Error updating user role:", error);
+    res.status(500).json({ message: "Failed to update user role" });
+  }
+});
+
+// Delete user endpoint for administrators
+app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    
+    // Check if user exists
+    const user = await storage.getUser(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    
+    // Prevent deleting your own account
+    if (userId === req.user!.id) {
+      return res.status(400).json({ message: "Cannot delete your own account" });
+    }
+    
+    // Here we would implement user deletion
+    // For now, we'll just return a success message
+    // In a real implementation, this would include:
+    // 1. Deleting user's expenses
+    // 2. Deleting user's incomes
+    // 3. Deleting user's budgets
+    // 4. Deleting user's categories
+    // 5. Finally deleting the user
+    
+    // Log activity for admin deleting user
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'DELETE',
+        resourceType: 'USER',
+        resourceId: userId,
+        description: `Admin deleted user account "${user.username}" (${user.email})`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          adminAction: 'delete-user',
+          targetUserId: userId,
+          targetUsername: user.username,
+          targetEmail: user.email
+        }
+      });
+      console.log('[DEBUG] Activity logged for admin deleting user');
+    } catch (logError) {
+      console.error('Failed to log admin delete user activity:', logError);
+    }
+    
+    res.status(200).json({ message: "User deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting user:", error);
+    res.status(500).json({ message: "Failed to delete user" });
+  }
+});
+
+// -------------------------------------------------------------------------
+// Activity Log Routes
+// -------------------------------------------------------------------------
+
+// Create activity log entry (for client-side logging)
+app.post("/api/activity-logs", requireAuth, async (req, res) => {
+  try {
+    const { actionType, resourceType, resourceId, description, metadata } = req.body;
+    
+    await logActivity({
+      userId: req.user!.id,
+      actionType,
+      resourceType,
+      resourceId,
+      description,
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent'),
+      metadata
+    });
+    
+    res.status(201).json({ message: 'Activity logged successfully' });
+  } catch (error) {
+    console.error('Error creating activity log:', error);
+    res.status(500).json({ message: 'Failed to create activity log' });
+  }
+});
+
+app.get("/api/activity-logs", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100); // Max 100 per request
+    const offset = (page - 1) * limit;
+    
+    // Search/filter parameters
+    const searchQuery = req.query.search as string || '';
+    const actionType = req.query.actionType as string || '';
+    const resourceType = req.query.resourceType as string || '';
+    const fromDate = req.query.fromDate as string || '';
+    const toDate = req.query.toDate as string || '';
+    
+    // Debug logging
+    console.log(`[DEBUG] Activity logs search - userId: ${userId}, searchQuery: "${searchQuery}", actionType: "${actionType}", resourceType: "${resourceType}"`);
+    
+    // Check if user is admin with user_id = 14
+    const isAdmin = userId === 14;
+    const targetUserId = isAdmin ? (req.query.userId ? parseInt(req.query.userId as string) : null) : userId;
+
+    const { getUserActivityLogs, getUserActivityLogsCount, getAllUsersActivityLogs, getAllUsersActivityLogsCount } = await import('./activity-loggers');
+    
+    let logs, totalCount;
+    
+    const filterOptions = {
+      searchQuery,
+      actionType,
+      resourceType,
+      fromDate,
+      toDate
+    };
+    
+    if (isAdmin && !targetUserId) {
+      // Admin viewing all users' activities
+      [logs, totalCount] = await Promise.all([
+        getAllUsersActivityLogs(limit, offset, filterOptions),
+        getAllUsersActivityLogsCount(filterOptions)
+      ]);
+    } else {
+      // Regular user viewing their own activities, or admin viewing specific user
+      const userIdToQuery = targetUserId || userId;
+      [logs, totalCount] = await Promise.all([
+        getUserActivityLogs(userIdToQuery, limit, offset, filterOptions),
+        getUserActivityLogsCount(userIdToQuery, filterOptions)
+      ]);
+    }
+
+    // Log activity for viewing activity logs
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'REPORT',
+        description: `Viewed activity history (${logs.length} logs)`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          page: page,
+          limit: limit,
+          searchQuery: searchQuery,
+          actionType: actionType,
+          resourceType: resourceType,
+          logCount: logs.length,
+          totalCount: totalCount,
+          isAdmin: isAdmin
+        }
+      });
+      console.log('[DEBUG] Activity logged for viewing activity history');
+    } catch (logError) {
+      console.error('Failed to log activity history view:', logError);
+    }
+
+    res.json({
+      logs,
+      pagination: {
+        page,
+        limit,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit)
+      },
+      isAdmin,
+      currentUserId: userId
+    });
+  } catch (error) {
+    console.error("Error fetching activity logs:", error);
+    res.status(500).json({ message: "Failed to fetch activity logs" });
+  }
+});
+
+// Delete a specific activity log entry
+app.delete("/api/activity-logs/:id", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const userId = req.user!.id;
+    
+    // Ensure the activity log belongs to the user
+    const logCheck = await pool.query('SELECT id FROM activity_log WHERE id = $1 AND user_id = $2', [id, userId]);
+    if (logCheck.rowCount === 0) {
+      return res.status(404).json({ message: "Activity log not found" });
+    }
+    
+    await pool.query('DELETE FROM activity_log WHERE id = $1 AND user_id = $2', [id, userId]);
+    
+    // Log activity for deleting activity log
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'DELETE',
+        resourceType: 'SETTINGS',
+        description: `Deleted activity log entry #${id}`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          deletedLogId: id
+        }
+      });
+      console.log('[DEBUG] Activity logged for deleting activity log entry');
+    } catch (logError) {
+      console.error('Failed to log activity log deletion:', logError);
+    }
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting activity log:", error);
+    res.status(500).json({ message: "Failed to delete activity log" });
+  }
+});
+
+// Clear all activity logs for the current user
+app.delete("/api/activity-logs", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const result = await pool.query('DELETE FROM activity_log WHERE user_id = $1', [userId]);
+    
+    // Log activity for clearing all activity logs
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'DELETE',
+        resourceType: 'SETTINGS',
+        description: `Cleared all activity history (${result.rowCount} entries)`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          clearedEntries: result.rowCount
+        }
+      });
+      console.log('[DEBUG] Activity logged for clearing all activity history');
+    } catch (logError) {
+      console.error('Failed to log activity history clear:', logError);
+    }
+    
+    res.json({ 
+      message: "All activity history cleared successfully",
+      deletedCount: result.rowCount 
+    });
+  } catch (error) {
+    console.error("Error clearing activity logs:", error);
+    res.status(500).json({ message: "Failed to clear activity history" });
+  }
+});
+
+app.get("/api/expenses/total-this-month", requireAuth, async (req, res) => {
   try {
     const userId = req.user!.id;
 
@@ -2090,7 +2549,6 @@ app.patch("/api/expenses/:id", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Failed to fetch total expenses" });
   }
 });
-
 
   const httpServer = createServer(app);
 
