@@ -25,14 +25,43 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatCurrency } from "@/lib/currency-formatter";
-import { Loader2, PieChart, BarChart, User as UserIcon, Search, UserPlus, Trash2, Edit, RefreshCw } from "lucide-react";
+import { 
+  Loader2, PieChart, BarChart, User as UserIcon, Search, UserPlus, Trash2, 
+  Edit, RefreshCw, Home, DollarSign, History, FileText, TrendingUp 
+} from "lucide-react";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import MainLayout from "@/components/layout/main-layout";
+
+interface DashboardStats {
+  users: {
+    total: number;
+    suspended: number;
+    deleted: number;
+    newLast7Days: number;
+  };
+  expenses: {
+    total: number;
+    totalAmount: number;
+    recent30Days: number;
+  };
+  incomes: {
+    total: number;
+    totalAmount: number;
+    recent30Days: number;
+  };
+  budgets: {
+    total: number;
+    usersWithBudgets: number;
+  };
+  recentActivity: any[];
+  topCategories: any[];
+}
 
 export default function AdminPage() {
   const { user } = useAuth();
   const { toast } = useToast();
-  const [selectedTab, setSelectedTab] = useState("users");
+  const [selectedTab, setSelectedTab] = useState("dashboard");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -48,6 +77,19 @@ export default function AdminPage() {
     }
   }, [user, toast]);
 
+  // Fetch dashboard stats
+  const { data: dashboardStats, isLoading: isLoadingDashboard } = useQuery<DashboardStats>({
+    queryKey: ["/api/admin/dashboard"],
+    queryFn: async () => {
+      const response = await fetch("/api/admin/dashboard");
+      if (!response.ok) {
+        throw new Error("Failed to fetch dashboard stats");
+      }
+      return response.json();
+    },
+    enabled: user?.role === "admin" && selectedTab === "dashboard",
+  });
+
   // Fetch all users
   const { data: users, isLoading: isLoadingUsers } = useQuery<User[]>({
     queryKey: ["/api/admin/users"],
@@ -58,7 +100,7 @@ export default function AdminPage() {
       }
       return response.json();
     },
-    enabled: user?.role === "admin",
+    enabled: user?.role === "admin" && selectedTab === "users",
   });
 
   // Fetch all expenses (for admin view)
@@ -74,6 +116,19 @@ export default function AdminPage() {
     enabled: user?.role === "admin" && selectedTab === "expenses",
   });
 
+  // Fetch all incomes (for admin view)
+  const { data: incomes, isLoading: isLoadingIncomes } = useQuery({
+    queryKey: ["/api/admin/incomes"],
+    queryFn: async () => {
+      const response = await fetch("/api/admin/incomes");
+      if (!response.ok) {
+        throw new Error("Failed to fetch incomes");
+      }
+      return response.json();
+    },
+    enabled: user?.role === "admin" && selectedTab === "incomes",
+  });
+
   // Fetch all budgets (for admin view)
   const { data: budgets, isLoading: isLoadingBudgets } = useQuery({
     queryKey: ["/api/admin/budgets"],
@@ -85,6 +140,20 @@ export default function AdminPage() {
       return response.json();
     },
     enabled: user?.role === "admin" && selectedTab === "budgets",
+  });
+
+  // Fetch all activity logs (for admin view)
+  const { data: activityLogs, isLoading: isLoadingActivity } = useQuery({
+    queryKey: ["/api/activity-logs"],
+    queryFn: async () => {
+      const response = await fetch("/api/activity-logs?limit=50");
+      if (!response.ok) {
+        throw new Error("Failed to fetch activity logs");
+      }
+      const data = await response.json();
+      return data.logs;
+    },
+    enabled: user?.role === "admin" && selectedTab === "history",
   });
 
   // Delete user mutation
@@ -100,6 +169,7 @@ export default function AdminPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/dashboard"] });
       toast({
         title: "User Deleted",
         description: "The user has been deleted successfully.",
@@ -133,6 +203,7 @@ export default function AdminPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/dashboard"] });
       toast({
         title: "User Updated",
         description: "The user role has been updated successfully.",
@@ -168,301 +239,564 @@ export default function AdminPage() {
 
   if (user?.role !== "admin") {
     return (
-      <div className="container max-w-6xl mx-auto px-4 py-8">
-        <Card>
-          <CardHeader>
-            <CardTitle>Access Denied</CardTitle>
-            <CardDescription>
-              You don't have permission to access the admin dashboard.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p className="text-center text-gray-500">
-              Please contact an administrator if you believe you should have access.
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+      <MainLayout>
+        <div className="container max-w-6xl mx-auto px-4 py-8">
+          <Card>
+            <CardHeader>
+              <CardTitle>Access Denied</CardTitle>
+              <CardDescription>
+                You don't have permission to access the admin dashboard.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <p className="text-center text-gray-500">
+                Please contact an administrator if you believe you should have access.
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </MainLayout>
     );
   }
 
   return (
-    <div className="container max-w-6xl mx-auto px-4 py-8">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Admin Dashboard</h1>
-        <div className="flex items-center space-x-2">
-          <Button 
-            variant="outline" 
-            size="sm"
-            onClick={() => {
-              queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
-              queryClient.invalidateQueries({ queryKey: ["/api/admin/expenses"] });
-              queryClient.invalidateQueries({ queryKey: ["/api/admin/budgets"] });
-            }}
-          >
-            <RefreshCw className="h-4 w-4 mr-2" />
-            Refresh Data
-          </Button>
-        </div>
-      </div>
-
-      <Tabs value={selectedTab} onValueChange={setSelectedTab} className="space-y-4">
-        <TabsList className="grid grid-cols-3 max-w-md">
-          <TabsTrigger value="users">
-            <UserIcon className="h-4 w-4 mr-2" />
-            Users
-          </TabsTrigger>
-          <TabsTrigger value="expenses">
-            <BarChart className="h-4 w-4 mr-2" />
-            Expenses
-          </TabsTrigger>
-          <TabsTrigger value="budgets">
-            <PieChart className="h-4 w-4 mr-2" />
-            Budgets
-          </TabsTrigger>
-        </TabsList>
-
-        {/* USERS TAB */}
-        <TabsContent value="users">
-          <Card>
-            <CardHeader>
-              <CardTitle>User Management</CardTitle>
-              <CardDescription>
-                View and manage all users in the system
-              </CardDescription>
-              <div className="mt-4 flex space-x-2">
-                <div className="relative flex-1">
-                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-500" />
-                  <Input
-                    type="search"
-                    placeholder="Search users..."
-                    className="pl-8"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                  />
-                </div>
-                <Button>
-                  <UserPlus className="h-4 w-4 mr-2" />
-                  Add User
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {isLoadingUsers ? (
-                <div className="flex justify-center py-8">
-                  <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-                </div>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Username</TableHead>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Email</TableHead>
-                      <TableHead>Role</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredUsers && filteredUsers.length > 0 ? (
-                      filteredUsers.map((user) => (
-                        <TableRow key={user.id}>
-                          <TableCell className="font-medium">{user.username}</TableCell>
-                          <TableCell>{user.name}</TableCell>
-                          <TableCell>{user.email}</TableCell>
-                          <TableCell>
-                            <Select
-                              value={user.role || "user"}
-                              onValueChange={(value) => handleRoleChange(user.id, value)}
-                            >
-                              <SelectTrigger className="w-28">
-                                <SelectValue placeholder="Role" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="user">User</SelectItem>
-                                <SelectItem value="admin">Admin</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 w-8 p-0 text-red-500"
-                              onClick={() => {
-                                setSelectedUser(user);
-                                setIsDeleteDialogOpen(true);
-                              }}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    ) : (
-                      <TableRow>
-                        <TableCell colSpan={5} className="text-center py-4 text-gray-500">
-                          No users found
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* EXPENSES TAB */}
-        <TabsContent value="expenses">
-          <Card>
-            <CardHeader>
-              <CardTitle>All Expenses</CardTitle>
-              <CardDescription>
-                View all expenses across all users in the system
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {isLoadingExpenses ? (
-                <div className="flex justify-center py-8">
-                  <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-                </div>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>User</TableHead>
-                      <TableHead>Description</TableHead>
-                      <TableHead>Category</TableHead>
-                      <TableHead>Date</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {expenses && expenses.length > 0 ? (
-                      expenses.map((expense: any) => (
-                        <TableRow key={expense.id}>
-                          <TableCell className="font-medium">{expense.userName || "Unknown"}</TableCell>
-                          <TableCell>{expense.description}</TableCell>
-                          <TableCell>{expense.categoryName || "Uncategorized"}</TableCell>
-                          <TableCell>{new Date(expense.date).toLocaleDateString()}</TableCell>
-                          <TableCell className="text-right">{formatCurrency(expense.amount)}</TableCell>
-                        </TableRow>
-                      ))
-                    ) : (
-                      <TableRow>
-                        <TableCell colSpan={5} className="text-center py-4 text-gray-500">
-                          No expenses found
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-            {expenses && expenses.length > 0 && (
-              <CardFooter className="border-t px-6 py-4">
-                <div className="w-full flex justify-between">
-                  <span className="font-medium">Total Expenses:</span>
-                  <span className="font-medium">
-                    {formatCurrency(
-                      expenses.reduce((sum: number, expense: any) => sum + expense.amount, 0)
-                    )}
-                  </span>
-                </div>
-              </CardFooter>
-            )}
-          </Card>
-        </TabsContent>
-
-        {/* BUDGETS TAB */}
-        <TabsContent value="budgets">
-          <Card>
-            <CardHeader>
-              <CardTitle>All Budgets</CardTitle>
-              <CardDescription>
-                View all budgets across all users in the system
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {isLoadingBudgets ? (
-                <div className="flex justify-center py-8">
-                  <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-                </div>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>User</TableHead>
-                      <TableHead>Budget Name</TableHead>
-                      <TableHead>Period</TableHead>
-                      <TableHead>Dates</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {budgets && budgets.length > 0 ? (
-                      budgets.map((budget: any) => (
-                        <TableRow key={budget.id}>
-                          <TableCell className="font-medium">{budget.userName || "Unknown"}</TableCell>
-                          <TableCell>{budget.name}</TableCell>
-                          <TableCell>
-                            {budget.period ? budget.period.charAt(0).toUpperCase() + budget.period.slice(1) : 'N/A'}
-                          </TableCell>
-                          <TableCell>
-                            {new Date(budget.startDate).toLocaleDateString()} - {new Date(budget.endDate).toLocaleDateString()}
-                          </TableCell>
-                          <TableCell className="text-right">{formatCurrency(budget.amount)}</TableCell>
-                        </TableRow>
-                      ))
-                    ) : (
-                      <TableRow>
-                        <TableCell colSpan={5} className="text-center py-4 text-gray-500">
-                          No budgets found
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-            {budgets && budgets.length > 0 && (
-              <CardFooter className="border-t px-6 py-4">
-                <div className="w-full flex justify-between">
-                  <span className="font-medium">Total Budget Amount:</span>
-                  <span className="font-medium">
-                    {formatCurrency(
-                      budgets.reduce((sum: number, budget: any) => sum + budget.amount, 0)
-                    )}
-                  </span>
-                </div>
-              </CardFooter>
-            )}
-          </Card>
-        </TabsContent>
-      </Tabs>
-
-      {/* Delete User Confirmation Dialog */}
-      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently delete the user account for "{selectedUser?.username}" and all associated data.
-              This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={confirmDeleteUser}
-              className="bg-red-600 hover:bg-red-700"
+    <MainLayout>
+      <div className="container max-w-7xl mx-auto px-4 py-8">
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h1 className="text-3xl font-bold">Admin Dashboard</h1>
+            <p className="text-gray-600">Manage your ExpenseTrack application</p>
+          </div>
+          <div className="flex items-center space-x-2">
+            <Button 
+              variant="outline" 
+              size="sm"
+              onClick={() => {
+                queryClient.invalidateQueries({ queryKey: ["/api/admin/dashboard"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/admin/expenses"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/admin/incomes"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/admin/budgets"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/activity-logs"] });
+              }}
             >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Refresh Data
+            </Button>
+          </div>
+        </div>
+
+        <Tabs value={selectedTab} onValueChange={setSelectedTab} className="space-y-6">
+          <TabsList className="grid grid-cols-6 max-w-2xl">
+            <TabsTrigger value="dashboard">
+              <Home className="h-4 w-4 mr-2" />
+              Dashboard
+            </TabsTrigger>
+            <TabsTrigger value="users">
+              <UserIcon className="h-4 w-4 mr-2" />
+              Users
+            </TabsTrigger>
+            <TabsTrigger value="expenses">
+              <BarChart className="h-4 w-4 mr-2" />
+              Expenses
+            </TabsTrigger>
+            <TabsTrigger value="incomes">
+              <DollarSign className="h-4 w-4 mr-2" />
+              Incomes
+            </TabsTrigger>
+            <TabsTrigger value="budgets">
+              <PieChart className="h-4 w-4 mr-2" />
+              Budgets
+            </TabsTrigger>
+            <TabsTrigger value="history">
+              <History className="h-4 w-4 mr-2" />
+              History
+            </TabsTrigger>
+          </TabsList>
+
+          {/* DASHBOARD TAB */}
+          <TabsContent value="dashboard">
+            {isLoadingDashboard ? (
+              <div className="flex justify-center py-12">
+                <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+              </div>
+            ) : dashboardStats ? (
+              <div className="space-y-6">
+                {/* Stats Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="text-sm font-medium">Total Users</CardTitle>
+                      <UserIcon className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{dashboardStats.users.total}</div>
+                      <p className="text-xs text-muted-foreground">
+                        +{dashboardStats.users.newLast7Days} new this week
+                      </p>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="text-sm font-medium">Total Expenses</CardTitle>
+                      <TrendingUp className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{formatCurrency(dashboardStats.expenses.totalAmount)}</div>
+                      <p className="text-xs text-muted-foreground">
+                        {dashboardStats.expenses.total} transactions
+                      </p>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="text-sm font-medium">Total Incomes</CardTitle>
+                      <DollarSign className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{formatCurrency(dashboardStats.incomes.totalAmount)}</div>
+                      <p className="text-xs text-muted-foreground">
+                        {dashboardStats.incomes.total} transactions
+                      </p>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="text-sm font-medium">Active Budgets</CardTitle>
+                      <PieChart className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{dashboardStats.budgets.total}</div>
+                      <p className="text-xs text-muted-foreground">
+                        {dashboardStats.budgets.usersWithBudgets} users with budgets
+                      </p>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Recent Activity & Top Categories */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Recent Activity</CardTitle>
+                      <CardDescription>Latest actions across the system</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-4">
+                        {dashboardStats.recentActivity.slice(0, 5).map((activity: any) => (
+                          <div key={activity.id} className="flex items-center space-x-4">
+                            <div className="flex-1 space-y-1">
+                              <p className="text-sm font-medium">{activity.description}</p>
+                              <p className="text-xs text-gray-500">
+                                {activity.user_name} • {new Date(activity.created_at).toLocaleString()}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Top Categories</CardTitle>
+                      <CardDescription>Most used expense categories</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-4">
+                        {dashboardStats.topCategories.map((category: any, index: number) => (
+                          <div key={category.name} className="flex items-center justify-between">
+                            <div className="flex items-center space-x-2">
+                              <span className="text-sm font-medium">{index + 1}.</span>
+                              <span className="text-sm">{category.name}</span>
+                            </div>
+                            <div className="text-sm font-medium">
+                              {formatCurrency(category.total_amount)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
+            ) : (
+              <Card>
+                <CardContent className="py-8">
+                  <p className="text-center text-gray-500">No dashboard data available</p>
+                </CardContent>
+              </Card>
+            )}
+          </TabsContent>
+
+          {/* USERS TAB - Keep your existing users tab content */}
+          <TabsContent value="users">
+            <Card>
+              <CardHeader>
+                <CardTitle>User Management</CardTitle>
+                <CardDescription>
+                  View and manage all users in the system
+                </CardDescription>
+                <div className="mt-4 flex space-x-2">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-500" />
+                    <Input
+                      type="search"
+                      placeholder="Search users..."
+                      className="pl-8"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                  </div>
+                  <Button>
+                    <UserPlus className="h-4 w-4 mr-2" />
+                    Add User
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {isLoadingUsers ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Username</TableHead>
+                        <TableHead>Name</TableHead>
+                        <TableHead>Email</TableHead>
+                        <TableHead>Role</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredUsers && filteredUsers.length > 0 ? (
+                        filteredUsers.map((user) => (
+                          <TableRow key={user.id}>
+                            <TableCell className="font-medium">{user.username}</TableCell>
+                            <TableCell>{user.name}</TableCell>
+                            <TableCell>{user.email}</TableCell>
+                            <TableCell>
+                              <Select
+                                value={user.role || "user"}
+                                onValueChange={(value) => handleRoleChange(user.id, value)}
+                              >
+                                <SelectTrigger className="w-28">
+                                  <SelectValue placeholder="Role" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="user">User</SelectItem>
+                                  <SelectItem value="admin">Admin</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 w-8 p-0 text-red-500"
+                                onClick={() => {
+                                  setSelectedUser(user);
+                                  setIsDeleteDialogOpen(true);
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={5} className="text-center py-4 text-gray-500">
+                            No users found
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* EXPENSES TAB - Keep your existing expenses tab content */}
+          <TabsContent value="expenses">
+            <Card>
+              <CardHeader>
+                <CardTitle>All Expenses</CardTitle>
+                <CardDescription>
+                  View all expenses across all users in the system
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {isLoadingExpenses ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>User</TableHead>
+                        <TableHead>Description</TableHead>
+                        <TableHead>Category</TableHead>
+                        <TableHead>Date</TableHead>
+                        <TableHead className="text-right">Amount</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {expenses && expenses.length > 0 ? (
+                        expenses.map((expense: any) => (
+                          <TableRow key={expense.id}>
+                            <TableCell className="font-medium">{expense.userName || "Unknown"}</TableCell>
+                            <TableCell>{expense.description}</TableCell>
+                            <TableCell>{expense.categoryName || "Uncategorized"}</TableCell>
+                            <TableCell>{new Date(expense.date).toLocaleDateString()}</TableCell>
+                            <TableCell className="text-right">{formatCurrency(expense.amount)}</TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={5} className="text-center py-4 text-gray-500">
+                            No expenses found
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+              {expenses && expenses.length > 0 && (
+                <CardFooter className="border-t px-6 py-4">
+                  <div className="w-full flex justify-between">
+                    <span className="font-medium">Total Expenses:</span>
+                    <span className="font-medium">
+                      {formatCurrency(
+                        expenses.reduce((sum: number, expense: any) => sum + expense.amount, 0)
+                      )}
+                    </span>
+                  </div>
+                </CardFooter>
+              )}
+            </Card>
+          </TabsContent>
+
+          {/* INCOMES TAB */}
+          <TabsContent value="incomes">
+            <Card>
+              <CardHeader>
+                <CardTitle>All Incomes</CardTitle>
+                <CardDescription>
+                  View all incomes across all users in the system
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {isLoadingIncomes ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>User</TableHead>
+                        <TableHead>Description</TableHead>
+                        <TableHead>Category</TableHead>
+                        <TableHead>Source</TableHead>
+                        <TableHead>Date</TableHead>
+                        <TableHead className="text-right">Amount</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {incomes && incomes.length > 0 ? (
+                        incomes.map((income: any) => (
+                          <TableRow key={income.id}>
+                            <TableCell className="font-medium">{income.userName || "Unknown"}</TableCell>
+                            <TableCell>{income.description}</TableCell>
+                            <TableCell>{income.categoryName || "Uncategorized"}</TableCell>
+                            <TableCell>{income.source || "N/A"}</TableCell>
+                            <TableCell>{new Date(income.date).toLocaleDateString()}</TableCell>
+                            <TableCell className="text-right">{formatCurrency(income.amount)}</TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-4 text-gray-500">
+                            No incomes found
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+              {incomes && incomes.length > 0 && (
+                <CardFooter className="border-t px-6 py-4">
+                  <div className="w-full flex justify-between">
+                    <span className="font-medium">Total Incomes:</span>
+                    <span className="font-medium">
+                      {formatCurrency(
+                        incomes.reduce((sum: number, income: any) => sum + income.amount, 0)
+                      )}
+                    </span>
+                  </div>
+                </CardFooter>
+              )}
+            </Card>
+          </TabsContent>
+
+          {/* BUDGETS TAB - Keep your existing budgets tab content */}
+          <TabsContent value="budgets">
+            <Card>
+              <CardHeader>
+                <CardTitle>All Budgets</CardTitle>
+                <CardDescription>
+                  View all budgets across all users in the system
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {isLoadingBudgets ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>User</TableHead>
+                        <TableHead>Budget Name</TableHead>
+                        <TableHead>Period</TableHead>
+                        <TableHead>Dates</TableHead>
+                        <TableHead className="text-right">Amount</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {budgets && budgets.length > 0 ? (
+                        budgets.map((budget: any) => (
+                          <TableRow key={budget.id}>
+                            <TableCell className="font-medium">{budget.userName || "Unknown"}</TableCell>
+                            <TableCell>{budget.name}</TableCell>
+                            <TableCell>
+                              {budget.period ? budget.period.charAt(0).toUpperCase() + budget.period.slice(1) : 'N/A'}
+                            </TableCell>
+                            <TableCell>
+                              {new Date(budget.startDate).toLocaleDateString()} - {new Date(budget.endDate).toLocaleDateString()}
+                            </TableCell>
+                            <TableCell className="text-right">{formatCurrency(budget.amount)}</TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={5} className="text-center py-4 text-gray-500">
+                            No budgets found
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+              {budgets && budgets.length > 0 && (
+                <CardFooter className="border-t px-6 py-4">
+                  <div className="w-full flex justify-between">
+                    <span className="font-medium">Total Budget Amount:</span>
+                    <span className="font-medium">
+                      {formatCurrency(
+                        budgets.reduce((sum: number, budget: any) => sum + budget.amount, 0)
+                      )}
+                    </span>
+                  </div>
+                </CardFooter>
+              )}
+            </Card>
+          </TabsContent>
+
+          {/* HISTORY TAB */}
+          <TabsContent value="history">
+            <Card>
+              <CardHeader>
+                <CardTitle>Activity History</CardTitle>
+                <CardDescription>
+                  View all activity logs across the system
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {isLoadingActivity ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>User</TableHead>
+                        <TableHead>Action</TableHead>
+                        <TableHead>Resource</TableHead>
+                        <TableHead>Description</TableHead>
+                        <TableHead>Date</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {activityLogs && activityLogs.length > 0 ? (
+                        activityLogs.map((log: any) => (
+                          <TableRow key={log.id}>
+                            <TableCell className="font-medium">{log.userName || "System"}</TableCell>
+                            <TableCell>
+                              <span className={`px-2 py-1 rounded-full text-xs ${
+                                log.actionType === 'CREATE' ? 'bg-green-100 text-green-800' :
+                                log.actionType === 'UPDATE' ? 'bg-blue-100 text-blue-800' :
+                                log.actionType === 'DELETE' ? 'bg-red-100 text-red-800' :
+                                'bg-gray-100 text-gray-800'
+                              }`}>
+                                {log.actionType}
+                              </span>
+                            </TableCell>
+                            <TableCell>{log.resourceType}</TableCell>
+                            <TableCell className="max-w-md truncate">{log.description}</TableCell>
+                            <TableCell>{new Date(log.createdAt).toLocaleString()}</TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={5} className="text-center py-4 text-gray-500">
+                            No activity logs found
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+
+        {/* Delete User Confirmation Dialog */}
+        <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will permanently delete the user account for "{selectedUser?.username}" and all associated data.
+                This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={confirmDeleteUser}
+                className="bg-red-600 hover:bg-red-700"
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </MainLayout>
   );
 }

@@ -18,8 +18,8 @@ export default function Sidebar() {
   const [location] = useLocation();
   const { user, logoutMutation } = useAuth();
 
-  // Base navigation items for all users
-  const baseNavigation = [
+  // Base navigation items for regular users
+  const regularUserNavigation = [
     { name: "Dashboard", href: "/", icon: Home },
     { name: "Expenses", href: "/expenses", icon: CreditCard },
     { name: "Income", href: "/income", icon: TrendingUp },
@@ -29,16 +29,19 @@ export default function Sidebar() {
     { name: "Settings", href: "/settings", icon: Settings },
   ];
   
-  // Admin-only navigation items
+  // Admin-only navigation items (Admin Dashboard at the top)
   const adminNavigation = [
     { name: "Admin Dashboard", href: "/admin", icon: ShieldAlert },
+    { name: "Expenses", href: "/expenses", icon: CreditCard },
+    { name: "Income", href: "/income", icon: TrendingUp },
+    { name: "Budgets", href: "/budgets", icon: PieChart },
+    { name: "Reports", href: "/reports", icon: BarChart2 },
+    { name: "History", href: "/history", icon: Clock },
+    { name: "Settings", href: "/settings", icon: Settings },
   ];
   
-  // Combine navigation items based on user role
-  const navigation = [
-    ...baseNavigation,
-    ...(user?.role === "admin" ? adminNavigation : []),
-  ];
+  // Use admin navigation for admin users, regular navigation for others
+  const navigation = user?.role === "admin" ? adminNavigation : regularUserNavigation;
 
   return (
     <div className="hidden lg:flex lg:flex-shrink-0">
@@ -76,6 +79,11 @@ export default function Sidebar() {
                 <div className="ml-3">
                   <p className="text-sm font-medium text-gray-700">{user?.name}</p>
                   <p className="text-xs text-gray-500">{user?.email}</p>
+                  {user?.role === "admin" && (
+                    <span className="inline-block mt-1 px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
+                      Admin
+                    </span>
+                  )}
                 </div>
               </div>
               <button

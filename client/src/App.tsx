@@ -1,5 +1,6 @@
 // Import routing components from wouter (lightweight React router)
-import { Switch, Route } from "wouter";
+import { Switch, Route, Redirect } from "wouter";
+import { useAuth } from "./hooks/use-auth";
 // Import React Query client for server state management
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -22,6 +23,17 @@ import HistoryPage from "@/pages/history-page";
 import BudgetsPage from "@/pages/budgets-page";
 import AdminPage from "@/pages/admin-page";
 
+// Create a component that redirects admin users to /admin
+function HomeRedirect() {
+  const { user } = useAuth();
+  
+  if (user?.role === "admin") {
+    return <Redirect to="/admin" />;
+  }
+  
+  return <HomePage />;
+}
+
 /**
  * Router Component
  * Defines all the routes in the application and which component to render for each URL
@@ -34,8 +46,8 @@ import AdminPage from "@/pages/admin-page";
 function Router() {
   return (
     <Switch>
-      {/* Dashboard/Home page - requires authentication */}
-      <ProtectedRoute path="/" component={HomePage} />
+      {/* Dashboard/Home page - requires authentication, redirects admin users to /admin */}
+      <ProtectedRoute path="/" component={HomeRedirect} />
       {/* Expense tracking page - requires authentication */}
       <ProtectedRoute path="/expenses" component={ExpensesPage} />
       {/* Income management page - requires authentication */}

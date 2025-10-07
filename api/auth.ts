@@ -97,68 +97,86 @@ export function setupAuth(app: Express) {
   });
 
   app.post("/api/register", async (req, res, next) => {
-    console.log("[DEBUG] /api/register headers:", req.headers);
-    console.log("[DEBUG] /api/register body:", req.body);
-    console.log("Register endpoint hit with data:", req.body);
-    const client = await pool.connect();
-    try {
-      // Validate input
-      const userData = insertUserSchema.parse(req.body);
-      const { username, password, name, email } = userData;
-      console.log("Validated user data:", userData);
-      // Check for existing user
-      const existingUserResult = await client.query('SELECT * FROM users WHERE username = $1', [username]);
-      if (existingUserResult.rows.length > 0) {
-        return res.status(400).json({ message: "Username already exists" });
-      }
-      console.log("No existing user found, proceeding to create user",password);
-
-
-      // Hash password and insert user
-      const hashedPassword = await hashPassword(password);
-      console.log(hashedPassword);
-      console.log("Inserting user into database:", { username, name, email });
-      const insertResult = await client.query(
-        'INSERT INTO users (username, password, name, email) VALUES ($1, $2, $3, $4) RETURNING id, username, name, email',
-        [username, hashedPassword, name, email]
-      );
-      const user = insertResult.rows[0];
-      console.log("Created new user:", user);
-
-      // Log the user in
-      req.login(user, (err) => {
-        if (err) return next(err);
-        res.status(201).json(user);
-      });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        const validationError = fromZodError(error);
-        res.status(400).json({ message: validationError.message });
-      } else {
-        next(error);
-      }
-    } finally {
-      // Release the client back to the pool
-      client.release();
+  console.log("[DEBUG] /api/register headers:", req.headers);
+  console.log("[DEBUG] /api/register body:", req.body);
+  console.log("Register endpoint hit with data:", req.body);
+  const client = await pool.connect();
+  try {
+    // Validate input
+    const userData = insertUserSchema.parse(req.body);
+    const { username, password, name, email } = userData;
+    console.log("Validated user data:", userData);
+    // Check for existing user
+    const existingUserResult = await client.query('SELECT * FROM users WHERE username = $1', [username]);
+    if (existingUserResult.rows.length > 0) {
+      return res.status(400).json({ message: "Username already exists" });
     }
-  });
+    console.log("No existing user found, proceeding to create user",password);
+
+    // Hash password and insert user
+    const hashedPassword = await hashPassword(password);
+    console.log(hashedPassword);
+    console.log("Inserting user into database:", { username, name, email });
+    const insertResult = await client.query(
+      'INSERT INTO users (username, password, name, email) VALUES ($1, $2, $3, $4) RETURNING id, username, name, email',
+      [username, hashedPassword, name, email]
+    );
+    const user = insertResult.rows[0];
+    console.log("Created new user:", user);
+
+    // Log the user in
+    req.login(user, (err) => {
+      if (err) return next(err);
+      
+      // ADD THIS: Include role in response (new users default to 'user')
+      const { password, ...userWithoutPassword } = user;
+      res.status(201).json({
+        ...userWithoutPassword,
+        role: 'user' // New users are regular users by default
+      });
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      const validationError = fromZodError(error);
+      res.status(400).json({ message: validationError.message });
+    } else {
+      next(error);
+    }
+  } finally {
+    // Release the client back to the pool
+    client.release();
+  }
+});
 
   app.post("/api/login", (req, res, next) => {
-    console.log("[DEBUG] /api/login headers:", req.headers);
-    console.log("[DEBUG] /api/login body:", req.body);
-    passport.authenticate("local", (err: any, user: any, info: any) => {
+  console.log("[DEBUG] /api/login headers:", req.headers);
+  console.log("[DEBUG] /api/login body:", req.body);
+  passport.authenticate("local", (err: any, user: any, info: any) => {
+    if (err) return next(err);
+    if (!user) {
+      return res.status(401).json({ message: "Invalid username or password" });
+    }
+    req.login(user, (err) => {
       if (err) return next(err);
-      if (!user) {
-        return res.status(401).json({ message: "Invalid username or password" });
-      }
-      req.login(user, (err) => {
-        if (err) return next(err);
-        // Don't return password in response
-        const { password, ...userWithoutPassword } = user;
-        return res.json(userWithoutPassword);
+      // Don't return password in response
+      const { password, ...userWithoutPassword } = user;
+      
+      // ADD THIS: Get user role and include it in response
+      storage.getUserRole(user.id).then(role => {
+        return res.json({
+          ...userWithoutPassword,
+          role: role // Include the role in the response
+        });
+      }).catch(error => {
+        console.error("Error getting user role:", error);
+        return res.json({
+          ...userWithoutPassword,
+          role: 'user' // Default to 'user' if there's an error
+        });
       });
-    })(req, res, next);
-  });
+    });
+  })(req, res, next);
+});
 
   app.post("/api/logout", (req, res, next) => {
     req.logout((err) => {
@@ -167,10 +185,17 @@ export function setupAuth(app: Express) {
     });
   });
 
-  app.get("/api/user", (req, res) => {
-    if (!req.isAuthenticated()) return res.sendStatus(401);
-    // Don't return password in response
-    const { password, ...userWithoutPassword } = req.user;
-    res.json(userWithoutPassword);
+  app.get("/api/user", async (req, res) => {
+  if (!req.isAuthenticated()) return res.sendStatus(401);
+  
+  // ADD THIS: Get user role
+  const userRole = await storage.getUserRole(req.user.id);
+  
+  // Don't return password in response
+  const { password, ...userWithoutPassword } = req.user;
+  res.json({
+    ...userWithoutPassword,
+    role: userRole
   });
+});
 }

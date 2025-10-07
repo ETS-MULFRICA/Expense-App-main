@@ -4,7 +4,7 @@ import { pool } from "./db";
 export interface ActivityLogEntry {
   userId: number;
   actionType: 'CREATE' | 'UPDATE' | 'DELETE' | 'LOGIN' | 'LOGOUT' | 'VIEW';
-  resourceType: 'EXPENSE' | 'INCOME' | 'BUDGET' | 'BUDGET_ALLOCATION' | 'CATEGORY' | 'USER' | 'REPORT' | 'SETTINGS';
+  resourceType: 'EXPENSE' | 'INCOME' | 'BUDGET' | 'BUDGET_ALLOCATION' | 'CATEGORY' | 'USER' | 'REPORT' | 'SETTINGS' | 'DASHBOARD';
   resourceId?: number;
   description: string;
   ipAddress?: string;

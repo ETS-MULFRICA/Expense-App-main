@@ -2237,6 +2237,126 @@ app.get("/api/admin/budgets", requireAdmin, async (req, res) => {
   }
 });
 
+
+// Admin Dashboard Main Route
+app.get("/api/admin/dashboard", requireAdmin, async (req, res) => {
+  try {
+    // Get comprehensive dashboard stats
+    const [
+      usersStats,
+      expensesStats,
+      incomesStats,
+      budgetsStats,
+      recentActivity,
+      topCategories
+    ] = await Promise.all([
+      // Users statistics - REMOVE THE COLUMNS THAT DON'T EXIST
+      pool.query(`
+        SELECT 
+          COUNT(*) as total_users,
+          COUNT(CASE WHEN created_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as new_users_7d
+        FROM users
+      `),
+      
+      // Expenses statistics
+      pool.query(`
+        SELECT 
+          COUNT(*) as total_expenses,
+          COALESCE(SUM(amount), 0) as total_expenses_amount,
+          COUNT(CASE WHEN date >= CURRENT_DATE - INTERVAL '30 days' THEN 1 END) as recent_expenses_30d
+        FROM expenses
+      `),
+      
+      // Incomes statistics
+      pool.query(`
+        SELECT 
+          COUNT(*) as total_incomes,
+          COALESCE(SUM(amount), 0) as total_incomes_amount,
+          COUNT(CASE WHEN date >= CURRENT_DATE - INTERVAL '30 days' THEN 1 END) as recent_incomes_30d
+        FROM incomes
+      `),
+      
+      // Budgets statistics
+      pool.query(`
+        SELECT 
+          COUNT(*) as total_budgets,
+          COUNT(DISTINCT user_id) as users_with_budgets
+        FROM budgets
+      `),
+      
+      // Recent activity
+      pool.query(`
+        SELECT al.*, u.name as user_name
+        FROM activity_log al
+        JOIN users u ON al.user_id = u.id
+        ORDER BY al.created_at DESC
+        LIMIT 10
+      `),
+      
+      // Top categories
+      pool.query(`
+        SELECT ec.name, COUNT(e.id) as transaction_count, SUM(e.amount) as total_amount
+        FROM expenses e
+        JOIN expense_categories ec ON e.category_id = ec.id
+        GROUP BY ec.name
+        ORDER BY total_amount DESC
+        LIMIT 5
+      `)
+    ]);
+
+    const dashboardData = {
+      users: {
+        total: parseInt(usersStats.rows[0].total_users),
+        suspended: 0, // Set to 0 since column doesn't exist yet
+        deleted: 0,   // Set to 0 since column doesn't exist yet
+        newLast7Days: parseInt(usersStats.rows[0].new_users_7d)
+      },
+      expenses: {
+        total: parseInt(expensesStats.rows[0].total_expenses),
+        totalAmount: parseInt(expensesStats.rows[0].total_expenses_amount),
+        recent30Days: parseInt(expensesStats.rows[0].recent_expenses_30d)
+      },
+      incomes: {
+        total: parseInt(incomesStats.rows[0].total_incomes),
+        totalAmount: parseInt(incomesStats.rows[0].total_incomes_amount),
+        recent30Days: parseInt(incomesStats.rows[0].recent_incomes_30d)
+      },
+      budgets: {
+        total: parseInt(budgetsStats.rows[0].total_budgets),
+        usersWithBudgets: parseInt(budgetsStats.rows[0].users_with_budgets)
+      },
+      recentActivity: recentActivity.rows,
+      topCategories: topCategories.rows
+    };
+
+    // Log activity for admin viewing dashboard
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'VIEW',
+        resourceType: 'DASHBOARD',
+        description: `Admin viewed dashboard`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { 
+          adminAction: 'view-dashboard',
+          stats: dashboardData
+        }
+      });
+      console.log('[DEBUG] Activity logged for admin viewing dashboard');
+    } catch (logError) {
+      console.error('Failed to log admin dashboard view activity:', logError);
+    }
+
+    res.json(dashboardData);
+  } catch (error) {
+    console.error("Error fetching admin dashboard:", error);
+    res.status(500).json({ message: "Failed to fetch admin dashboard" });
+  }
+});
+
+// Update user role endpoint for administrators
+
 app.patch("/api/admin/users/:id/role", requireAdmin, async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
