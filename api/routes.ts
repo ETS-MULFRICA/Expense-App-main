@@ -71,12 +71,301 @@ const requireAdmin = async (req: Request, res: Response, next: Function) => {
   next();
 };
 
+// Permission check helper
+async function userHasPermission(userId: number, permissionName: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1
+     FROM user_roles ur
+     JOIN role_permissions rp ON rp.role_id = ur.role_id
+     JOIN permissions p ON p.id = rp.permission_id
+     WHERE ur.user_id = $1 AND p.name = $2
+     LIMIT 1`,
+    [userId, permissionName]
+  );
+  if ((result.rowCount ?? 0) > 0) return true;
+  // Fallback: grant if legacy role is admin
+  try {
+    const role = await storage.getUserRole(userId);
+    if (role === 'admin') return true;
+  } catch {}
+  return false;
+}
+
+function requirePermission(permission: string) {
+  return async (req: Request, res: Response, next: Function) => {
+    if (!req.isAuthenticated() || !req.user) return res.sendStatus(401);
+    try {
+      const ok = await userHasPermission(req.user.id, permission);
+      if (!ok) return res.status(403).json({ message: 'Forbidden' });
+      next();
+    } catch (e) {
+      console.error('Permission check failed', e);
+      return res.status(500).json({ message: 'Permission check error' });
+    }
+  };
+}
+
 /**
  * Main Route Registration Function
  * Sets up all API endpoints for the expense management system
  * Returns HTTP server instance for external configuration
  */
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Lightweight capabilities endpoint: current user's permissions and app default currency
+  app.get('/api/capabilities', requireAuth, async (req, res) => {
+    try {
+      const permissions = await storage.getUserPermissions(req.user!.id).catch(() => [] as string[]);
+      let appDefaultCurrency: string | undefined;
+      try {
+        const r = await pool.query('SELECT default_currency FROM app_settings WHERE id = 1');
+        appDefaultCurrency = r.rows[0]?.default_currency;
+      } catch {}
+      res.json({ permissions, appDefaultCurrency });
+    } catch (e) {
+      console.error('Capabilities fetch failed', e);
+      res.status(500).json({ message: 'Failed to fetch capabilities' });
+    }
+  });
+  // --- Roles & Permissions admin API ---
+  app.get('/api/admin/roles', requireAuth, requirePermission('admin.access'), async (_req, res) => {
+    const roles = await pool.query('SELECT * FROM roles ORDER BY created_at DESC');
+    res.json(roles.rows);
+  });
+
+  app.get('/api/admin/permissions', requireAuth, requirePermission('admin.access'), async (_req, res) => {
+    const perms = await pool.query('SELECT * FROM permissions ORDER BY created_at DESC');
+    res.json(perms.rows);
+  });
+
+  app.post('/api/admin/roles', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    const { name, description } = req.body || {};
+    if (!name || typeof name !== 'string') return res.status(400).json({ message: 'Name is required' });
+    try {
+      const result = await pool.query('INSERT INTO roles (name, description) VALUES ($1, $2) RETURNING *', [name.trim(), description || null]);
+      res.status(201).json(result.rows[0]);
+    } catch (e: any) {
+      if (e.code === '23505') return res.status(409).json({ message: 'Role already exists' });
+      console.error('Create role error', e);
+      res.status(500).json({ message: 'Failed to create role' });
+    }
+  });
+
+  app.post('/api/admin/roles/:roleId/permissions', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    const roleId = parseInt(req.params.roleId);
+    const { permissionIds } = req.body || {};
+    if (!Array.isArray(permissionIds)) return res.status(400).json({ message: 'permissionIds must be an array' });
+    try {
+      for (const pid of permissionIds) {
+        await pool.query('INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [roleId, pid]);
+      }
+      res.status(204).send();
+    } catch (e) {
+      console.error('Assign permissions error', e);
+      res.status(500).json({ message: 'Failed to assign permissions' });
+    }
+  });
+
+  app.delete('/api/admin/roles/:roleId/permissions/:permissionId', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    const roleId = parseInt(req.params.roleId);
+    const permissionId = parseInt(req.params.permissionId);
+    await pool.query('DELETE FROM role_permissions WHERE role_id = $1 AND permission_id = $2', [roleId, permissionId]);
+    res.status(204).send();
+  });
+
+  app.post('/api/admin/users/:userId/roles', requireAuth, requirePermission('user.manage'), async (req, res) => {
+    const userId = parseInt(req.params.userId);
+    const { roleId } = req.body || {};
+    if (!roleId) return res.status(400).json({ message: 'roleId required' });
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, roleId]);
+    res.status(204).send();
+  });
+
+  app.delete('/api/admin/users/:userId/roles/:roleId', requireAuth, requirePermission('user.manage'), async (req, res) => {
+    const userId = parseInt(req.params.userId);
+    const roleId = parseInt(req.params.roleId);
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [userId, roleId]);
+    res.status(204).send();
+  });
+
+  // --- Admin CRUD for Expenses ---
+  // Update any expense
+  app.patch('/api/admin/expenses/:id', requireAuth, requirePermission('admin.access'), requirePermission('expense.write'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getExpenseById(id);
+      if (!existing) return res.status(404).json({ message: 'Expense not found' });
+      const data = req.body || {};
+      // Build update payload keeping existing defaults
+      const updatePayload = {
+        userId: existing.user_id || existing.userId,
+        amount: data.amount ?? existing.amount,
+        description: data.description ?? existing.description,
+        date: data.date ? new Date(data.date) : existing.date,
+        categoryId: data.categoryId ?? existing.category_id ?? existing.categoryId,
+        subcategoryId: data.subcategoryId ?? existing.subcategory_id ?? existing.subcategoryId,
+        merchant: data.merchant ?? existing.merchant,
+        notes: data.notes ?? existing.notes,
+      };
+      const updated = await storage.updateExpense(id, updatePayload as any);
+      try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'EXPENSE', resourceId: id, description: `Admin updated expense ${id}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.json(updated);
+    } catch (e) {
+      console.error('Admin update expense error', e);
+      res.status(500).json({ message: 'Failed to update expense' });
+    }
+  });
+
+  // Delete any expense
+  app.delete('/api/admin/expenses/:id', requireAuth, requirePermission('admin.access'), requirePermission('expense.write'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getExpenseById(id);
+      if (!existing) return res.status(404).json({ message: 'Expense not found' });
+      await storage.deleteExpense(id);
+      try { await logActivity({ userId: req.user!.id, actionType: 'DELETE', resourceType: 'EXPENSE', resourceId: id, description: `Admin deleted expense ${id}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.status(204).send();
+    } catch (e) {
+      console.error('Admin delete expense error', e);
+      res.status(500).json({ message: 'Failed to delete expense' });
+    }
+  });
+
+  // --- Admin CRUD for Incomes ---
+  app.patch('/api/admin/incomes/:id', requireAuth, requirePermission('admin.access'), requirePermission('income.write'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getIncomeById(id);
+      if (!existing) return res.status(404).json({ message: 'Income not found' });
+      const data = req.body || {};
+      const updatePayload = {
+        userId: existing.userId,
+        amount: data.amount ?? existing.amount,
+        description: data.description ?? existing.description,
+        date: data.date ? new Date(data.date) : existing.date,
+        categoryId: data.categoryId ?? existing.categoryId,
+        subcategoryId: data.subcategoryId ?? existing.subcategoryId,
+        source: data.source ?? existing.source,
+        notes: data.notes ?? existing.notes,
+      };
+      const updated = await storage.updateIncome(id, updatePayload as any);
+      try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'INCOME', resourceId: id, description: `Admin updated income ${id}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.json(updated);
+    } catch (e) {
+      console.error('Admin update income error', e);
+      res.status(500).json({ message: 'Failed to update income' });
+    }
+  });
+
+  app.delete('/api/admin/incomes/:id', requireAuth, requirePermission('admin.access'), requirePermission('income.write'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getIncomeById(id);
+      if (!existing) return res.status(404).json({ message: 'Income not found' });
+      await storage.deleteIncome(id);
+      try { await logActivity({ userId: req.user!.id, actionType: 'DELETE', resourceType: 'INCOME', resourceId: id, description: `Admin deleted income ${id}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.status(204).send();
+    } catch (e) {
+      console.error('Admin delete income error', e);
+      res.status(500).json({ message: 'Failed to delete income' });
+    }
+  });
+
+  // --- Admin CRUD for Budgets ---
+  app.post('/api/admin/users/:userId/budgets', requireAuth, requirePermission('admin.access'), requirePermission('budget.write'), async (req, res) => {
+    try {
+      const userId = parseInt(req.params.userId);
+      const target = await storage.getUser(userId);
+      if (!target) return res.status(404).json({ message: 'User not found' });
+      const data = req.body || {};
+      const toCreate = {
+        userId,
+        name: data.name,
+        period: data.period || 'monthly',
+        startDate: new Date(data.startDate),
+        endDate: new Date(data.endDate),
+        amount: data.amount,
+        notes: data.notes || null,
+      };
+      const created = await storage.createBudget(toCreate as any);
+      try { await logActivity({ userId: req.user!.id, actionType: 'CREATE', resourceType: 'BUDGET', resourceId: created.id, description: `Admin created budget for user ${userId}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.status(201).json(created);
+    } catch (e) {
+      console.error('Admin create budget error', e);
+      res.status(500).json({ message: 'Failed to create budget' });
+    }
+  });
+
+  app.patch('/api/admin/budgets/:id', requireAuth, requirePermission('admin.access'), requirePermission('budget.write'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getBudgetById(id);
+      if (!existing) return res.status(404).json({ message: 'Budget not found' });
+      const data = req.body || {};
+      const payload = {
+        name: data.name ?? existing.name,
+        period: data.period ?? existing.period,
+        startDate: data.startDate ? new Date(data.startDate) : existing.startDate,
+        endDate: data.endDate ? new Date(data.endDate) : existing.endDate,
+        amount: data.amount ?? existing.amount,
+        notes: data.notes ?? existing.notes,
+      };
+      const updated = await storage.updateBudget(id, payload as any);
+      try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'BUDGET', resourceId: id, description: `Admin updated budget ${id}` , ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.json(updated);
+    } catch (e) {
+      console.error('Admin update budget error', e);
+      res.status(500).json({ message: 'Failed to update budget' });
+    }
+  });
+
+  app.delete('/api/admin/budgets/:id', requireAuth, requirePermission('admin.access'), requirePermission('budget.write'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getBudgetById(id);
+      if (!existing) return res.status(404).json({ message: 'Budget not found' });
+      await storage.deleteBudget(id);
+      try { await logActivity({ userId: req.user!.id, actionType: 'DELETE', resourceType: 'BUDGET', resourceId: id, description: `Admin deleted budget ${id}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.status(204).send();
+    } catch (e) {
+      console.error('Admin delete budget error', e);
+      res.status(500).json({ message: 'Failed to delete budget' });
+    }
+  });
+
+  // --- System Settings (Admin) ---
+  app.get('/api/admin/settings', requireAuth, requirePermission('admin.access'), async (_req, res) => {
+    try {
+      const r = await pool.query('SELECT * FROM app_settings WHERE id = 1');
+      res.json(r.rows[0] || {});
+    } catch (e) {
+      console.error('Fetch settings error', e);
+      res.status(500).json({ message: 'Failed to load settings' });
+    }
+  });
+
+  app.patch('/api/admin/settings', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const { siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates } = req.body || {};
+      const r = await pool.query(
+        `UPDATE app_settings SET 
+           site_name = COALESCE($1, site_name),
+           logo_data_url = COALESCE($2, logo_data_url),
+           default_currency = COALESCE($3, default_currency),
+           language = COALESCE($4, language),
+           email_from = COALESCE($5, email_from),
+           email_templates = COALESCE($6, email_templates),
+           updated_at = NOW()
+         WHERE id = 1
+         RETURNING *`,
+        [siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates || null]
+      );
+      try { await logActivity({ userId: (req.user as any).id, actionType: 'UPDATE', resourceType: 'SETTINGS', description: 'Admin updated system settings', ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.json(r.rows[0]);
+    } catch (e) {
+      console.error('Update settings error', e);
+      res.status(500).json({ message: 'Failed to update settings' });
+    }
+  });
   // -------------------------------------------------------------------------
 // Income Deletion Route
 // -------------------------------------------------------------------------
@@ -2151,7 +2440,7 @@ app.post("/api/user/account-action", requireAuth, async (req, res) => {
   // -------------------------------------------------------------------------
 // Admin routes
 // -------------------------------------------------------------------------
-app.get("/api/admin/users", requireAdmin, async (req, res) => {
+app.get("/api/admin/users", requireAuth, requirePermission('user.manage'), async (req, res) => {
   try {
     const users = await storage.getAllUsers();
     // Remove passwords from response
@@ -2187,7 +2476,7 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
 });
 
 // Create user (admin)
-app.post("/api/admin/users", requireAdmin, async (req, res) => {
+app.post("/api/admin/users", requireAuth, requirePermission('user.manage'), async (req, res) => {
   try {
     const { username, name, email, role = 'user' } = req.body;
     const tempPassword = req.body.password || Math.random().toString(36).slice(-10);
@@ -2207,6 +2496,16 @@ app.post("/api/admin/users", requireAdmin, async (req, res) => {
       [username, hashed, name, email, role, 'active']
     );
     const user = result.rows[0];
+    // Mirror role into RBAC user_roles for permission middleware
+    try {
+      const roleRes = await pool.query('SELECT id FROM roles WHERE name = $1', [role]);
+      const roleId = roleRes.rows[0]?.id;
+      if (roleId) {
+        await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [user.id, roleId]);
+      }
+    } catch (e) {
+      console.warn('Failed to sync user_roles for new user', e);
+    }
     // Create default categories for the new user
     await storage.createDefaultCategories(user.id);
     try {
@@ -2229,7 +2528,7 @@ app.post("/api/admin/users", requireAdmin, async (req, res) => {
 });
 
 // Suspend or activate user
-app.patch('/api/admin/users/:id/status', requireAdmin, async (req, res) => {
+app.patch('/api/admin/users/:id/status', requireAuth, requirePermission('user.manage'), async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
     const { status } = req.body as { status: 'active'|'suspended'|'deleted' };
@@ -2241,11 +2540,12 @@ app.patch('/api/admin/users/:id/status', requireAdmin, async (req, res) => {
     }
     const existing = await storage.getUser(userId);
     if (!existing) return res.status(404).json({ message: 'User not found' });
-    const now = new Date();
     await pool.query(
-      `UPDATE users SET status = $1, suspended_at = CASE WHEN $1='suspended' THEN $2 ELSE NULL END,
-       deleted_at = CASE WHEN $1='deleted' THEN $2 ELSE NULL END WHERE id = $3`,
-      [status, now, userId]
+      `UPDATE users SET status = $1,
+         suspended_at = CASE WHEN $1='suspended' THEN NOW() ELSE NULL END,
+         deleted_at = CASE WHEN $1='deleted' THEN NOW() ELSE NULL END
+       WHERE id = $2`,
+      [status, userId]
     );
     try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'USER', resourceId: userId, description: `Admin set status to ${status} for ${existing.username}`, ipAddress: req.ip, userAgent: req.get('User-Agent'), metadata: { adminAction: 'update-status', status } }); } catch {}
     res.json({ message: 'Status updated' });
@@ -2256,7 +2556,7 @@ app.patch('/api/admin/users/:id/status', requireAdmin, async (req, res) => {
 });
 
 // Reset user password (admin)
-app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) => {
+app.post('/api/admin/users/:id/reset-password', requireAuth, requirePermission('user.manage'), async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
     const user = await storage.getUser(userId);
@@ -2273,7 +2573,7 @@ app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) =
   }
 });
 
-app.get("/api/admin/expenses", requireAdmin, async (req, res) => {
+app.get("/api/admin/expenses", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
     const expenses = await storage.getAllExpenses();
     
@@ -2303,7 +2603,7 @@ app.get("/api/admin/expenses", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/api/admin/incomes", requireAdmin, async (req, res) => {
+app.get("/api/admin/incomes", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
     const incomes = await storage.getAllIncomes();
     
@@ -2333,7 +2633,7 @@ app.get("/api/admin/incomes", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/api/admin/budgets", requireAdmin, async (req, res) => {
+app.get("/api/admin/budgets", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
     // Collect all budgets from all users
     const users = await storage.getAllUsers();
@@ -2379,7 +2679,7 @@ app.get("/api/admin/budgets", requireAdmin, async (req, res) => {
 
 
 // Admin Dashboard Main Route
-app.get("/api/admin/dashboard", requireAdmin, async (req, res) => {
+app.get("/api/admin/dashboard", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
     // Get comprehensive dashboard stats
     const [
@@ -2388,7 +2688,8 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res) => {
       incomesStats,
       budgetsStats,
       recentActivity,
-      topCategories
+      topCategories,
+      dailyActive
     ] = await Promise.all([
       // Users statistics - REMOVE THE COLUMNS THAT DON'T EXIST
       pool.query(`
@@ -2441,6 +2742,16 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res) => {
         GROUP BY ec.name
         ORDER BY total_amount DESC
         LIMIT 5
+      `),
+      // Daily active users via union of logs and transactions
+      pool.query(`
+        SELECT COUNT(DISTINCT user_id) as dau FROM (
+          SELECT user_id FROM activity_log WHERE created_at >= CURRENT_DATE
+          UNION
+          SELECT user_id FROM expenses WHERE date >= CURRENT_DATE
+          UNION
+          SELECT user_id FROM incomes WHERE date >= CURRENT_DATE
+        ) t
       `)
     ]);
 
@@ -2449,7 +2760,8 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res) => {
         total: parseInt(usersStats.rows[0].total_users),
         suspended: 0, // Set to 0 since column doesn't exist yet
         deleted: 0,   // Set to 0 since column doesn't exist yet
-        newLast7Days: parseInt(usersStats.rows[0].new_users_7d)
+        newLast7Days: parseInt(usersStats.rows[0].new_users_7d),
+        dailyActive: parseInt(dailyActive.rows[0]?.dau || 0)
       },
       expenses: {
         total: parseInt(expensesStats.rows[0].total_expenses),
@@ -2465,6 +2777,7 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res) => {
         total: parseInt(budgetsStats.rows[0].total_budgets),
         usersWithBudgets: parseInt(budgetsStats.rows[0].users_with_budgets)
       },
+      totalTransactions: parseInt(expensesStats.rows[0].total_expenses) + parseInt(incomesStats.rows[0].total_incomes),
       recentActivity: recentActivity.rows,
       topCategories: topCategories.rows
     };
@@ -2497,7 +2810,7 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res) => {
 
 // Update user role endpoint for administrators
 
-app.patch("/api/admin/users/:id/role", requireAdmin, async (req, res) => {
+app.patch("/api/admin/users/:id/role", requireAuth, requirePermission('user.manage'), async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
     const { role } = req.body;
@@ -2515,6 +2828,18 @@ app.patch("/api/admin/users/:id/role", requireAdmin, async (req, res) => {
     const oldRole = await storage.getUserRole(userId);
     
     await storage.setUserRole(userId, role);
+    // Sync RBAC mapping for core system roles (admin/user)
+    try {
+      const roleRow = await pool.query('SELECT id FROM roles WHERE name = $1', [role]);
+      const newRoleId = roleRow.rows[0]?.id;
+      if (newRoleId) {
+        // Remove legacy system role mappings and add the new one
+        await pool.query("DELETE FROM user_roles WHERE user_id = $1 AND role_id IN (SELECT id FROM roles WHERE name IN ('admin','user'))", [userId]);
+        await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, newRoleId]);
+      }
+    } catch (e) {
+      console.warn('Failed to sync user_roles on role update', e);
+    }
     
     // Log activity for admin updating user role
     try {
@@ -2547,7 +2872,7 @@ app.patch("/api/admin/users/:id/role", requireAdmin, async (req, res) => {
 });
 
 // Delete user endpoint for administrators
-app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
+app.delete("/api/admin/users/:id", requireAuth, requirePermission('user.manage'), async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
     

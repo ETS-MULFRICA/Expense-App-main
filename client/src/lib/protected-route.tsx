@@ -21,10 +21,12 @@ export function ProtectedRoute({
   path,
   component: Component,
   requiredRole,
+  requiredPermission,
 }: {
   path: string;
   component: () => React.JSX.Element;
   requiredRole?: string;
+  requiredPermission?: string;
 }) {
   const { user, isLoading } = useAuth();
 
@@ -54,17 +56,17 @@ export function ProtectedRoute({
     );
   }
 
-  /**
-   * Role-Based Authorization Check
-   * Redirects users without required role to home page
-   * Used for admin-only routes
-   */
-  if (requiredRole && user.role !== requiredRole) {
-    return (
-      <Route path={path}>
-        <Redirect to="/" />
-      </Route>
-    );
+  // Authorization Check: allow if either required role or permission is satisfied
+  if (requiredRole || requiredPermission) {
+    const hasRole = requiredRole ? user.role === requiredRole : false;
+    const hasPerm = requiredPermission ? user.permissions?.includes(requiredPermission) : false;
+    if (!(hasRole || hasPerm)) {
+      return (
+        <Route path={path}>
+          <Redirect to="/" />
+        </Route>
+      );
+    }
   }
 
   /**

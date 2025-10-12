@@ -18,7 +18,7 @@ import { useToast } from "@/hooks/use-toast";
  * Defines the shape of authentication state and methods
  */
 type AuthContextType = {
-  user: SelectUser | null;              // Current authenticated user or null
+  user: (SelectUser & { permissions?: string[]; appDefaultCurrency?: string }) | null;              // Current authenticated user or null
   isLoading: boolean;                   // Loading state during auth checks
   error: Error | null;                  // Any authentication errors
   loginMutation: UseMutationResult<SelectUser, Error, LoginData>;     // Login function
@@ -57,7 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     data: user,
     error,
     isLoading,
-  } = useQuery<SelectUser | undefined, Error>({
+  } = useQuery<(SelectUser & { permissions?: string[]; appDefaultCurrency?: string }) | undefined, Error>({
     queryKey: ["/api/user"],
     queryFn: getQueryFn({ on401: "returnNull" }),
   });
@@ -74,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await apiRequest("POST", "/api/login", credentials);
       return await res.json();
     },
-    onSuccess: (user: SelectUser) => {
+  onSuccess: (user: SelectUser) => {
       queryClient.setQueryData(["/api/user"], user);
       toast({
         title: "Welcome back!",

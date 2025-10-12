@@ -107,6 +107,120 @@ CREATE TABLE IF NOT EXISTS budget_allocations (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Roles & Permissions
+CREATE TABLE IF NOT EXISTS roles (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  is_system BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS permissions (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+  role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  permission_id INTEGER NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+  PRIMARY KEY (role_id, permission_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, role_id)
+);
+
+-- Seed default roles
+INSERT INTO roles (name, description, is_system) VALUES
+  ('admin', 'Administrator role with full access', true)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO roles (name, description, is_system) VALUES
+  ('user', 'Standard user role', true)
+ON CONFLICT (name) DO NOTHING;
+
+-- Seed default permissions
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name = 'permissions' AND column_name = 'action'
+  ) THEN
+    -- Schema with resource + action columns present
+    INSERT INTO permissions (name, description, resource, action) VALUES
+      ('admin.access', 'Access to admin dashboard and routes', 'system', 'access'),
+      ('user.manage', 'Manage users (create, update, suspend, reset, delete)', 'user', 'manage'),
+      ('expense.read', 'Read expenses', 'expense', 'read'),
+      ('expense.write', 'Create/update/delete expenses', 'expense', 'write'),
+      ('income.read', 'Read incomes', 'income', 'read'),
+      ('income.write', 'Create/update/delete incomes', 'income', 'write'),
+      ('budget.read', 'Read budgets', 'budget', 'read'),
+      ('budget.write', 'Create/update/delete budgets', 'budget', 'write')
+    ON CONFLICT (name) DO NOTHING;
+  ELSIF EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name = 'permissions' AND column_name = 'resource'
+  ) THEN
+    -- Schema with only resource column present
+    INSERT INTO permissions (name, description, resource) VALUES
+      ('admin.access', 'Access to admin dashboard and routes', 'system'),
+      ('user.manage', 'Manage users (create, update, suspend, reset, delete)', 'user'),
+      ('expense.read', 'Read expenses', 'expense'),
+      ('expense.write', 'Create/update/delete expenses', 'expense'),
+      ('income.read', 'Read incomes', 'income'),
+      ('income.write', 'Create/update/delete incomes', 'income'),
+      ('budget.read', 'Read budgets', 'budget'),
+      ('budget.write', 'Create/update/delete budgets', 'budget')
+    ON CONFLICT (name) DO NOTHING;
+  ELSE
+    -- Minimal schema
+    INSERT INTO permissions (name, description) VALUES
+      ('admin.access', 'Access to admin dashboard and routes'),
+      ('user.manage', 'Manage users (create, update, suspend, reset, delete)'),
+      ('expense.read', 'Read expenses'),
+      ('expense.write', 'Create/update/delete expenses'),
+      ('income.read', 'Read incomes'),
+      ('income.write', 'Create/update/delete incomes'),
+      ('budget.read', 'Read budgets'),
+      ('budget.write', 'Create/update/delete budgets')
+    ON CONFLICT (name) DO NOTHING;
+  END IF;
+END $$;
+
+-- Link admin role to broad permissions
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r, permissions p
+WHERE r.name = 'admin'
+  AND p.name IN ('admin.access','user.manage','expense.read','expense.write','income.read','income.write','budget.read','budget.write')
+ON CONFLICT DO NOTHING;
+
+-- Ensure user role has basic reads
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r, permissions p
+WHERE r.name = 'user'
+  AND p.name IN ('expense.read','income.read','budget.read')
+ON CONFLICT DO NOTHING;
+
+-- Backfill user_roles from legacy users.role column
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u
+JOIN roles r ON r.name = 'admin'
+WHERE u.role = 'admin'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u
+JOIN roles r ON r.name = 'user'
+WHERE (u.role IS NULL OR u.role = 'user')
+ON CONFLICT DO NOTHING;
+
 -- Create activity_log table for tracking user actions
 CREATE TABLE IF NOT EXISTS activity_log (
     id SERIAL PRIMARY KEY,

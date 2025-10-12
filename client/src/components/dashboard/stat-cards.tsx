@@ -5,6 +5,7 @@ import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
+import { getEffectiveCurrency } from "@/lib/utils";
 import { formatCurrency } from "@/lib/currency-formatter";
 
 interface StatCardsProps {
@@ -36,7 +37,7 @@ export default function StatCards({
                 </dt>
                 <dd>
                   <div className="text-xl font-bold text-gray-900">
-                    {formatCurrency(totalExpenses, user?.currency || 'XAF')}
+                    {formatCurrency(totalExpenses, getEffectiveCurrency(user || undefined))}
                   </div>
                 </dd>
               </dl>

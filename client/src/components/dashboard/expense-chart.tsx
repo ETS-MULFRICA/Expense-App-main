@@ -14,6 +14,7 @@ import { format, subMonths, compareAsc } from 'date-fns';
 import { Expense, ExpenseCategory } from "@shared/schema";
 import { useAuth } from "@/hooks/use-auth";
 import { formatCurrency } from "@/lib/currency-formatter";
+import { getEffectiveCurrency } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 
 interface ExpenseChartProps {
@@ -167,7 +168,7 @@ export default function ExpenseChart({ expenses }: ExpenseChartProps) {
               <XAxis dataKey="month" />
               <YAxis />
               <Tooltip 
-                formatter={(value: number) => [formatCurrency(value, user?.currency || 'XAF'), 'Amount']} 
+                formatter={(value: number) => [formatCurrency(value, getEffectiveCurrency(user || undefined)), 'Amount']} 
               />
               <Legend />
               {categoryNames.map((category) => (

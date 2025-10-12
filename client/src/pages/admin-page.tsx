@@ -27,11 +27,14 @@ import {
 import { formatCurrency } from "@/lib/currency-formatter";
 import { 
   Loader2, PieChart, BarChart, User as UserIcon, Search, UserPlus, Trash2, 
-  Edit, RefreshCw, Home, DollarSign, History, FileText, TrendingUp, ShieldBan, ShieldCheck, KeyRound 
+  Edit, RefreshCw, Home, DollarSign, History, FileText, TrendingUp, ShieldBan, ShieldCheck, KeyRound, Settings 
 } from "lucide-react";
 import { queryClient } from "@/lib/queryClient";
+import { exportExpensesToCSV, exportExpensesToPDF, exportIncomesToCSV, exportIncomesToPDF, exportBudgetsToCSV, exportBudgetsToPDF } from "@/lib/export-utils";
 import { useToast } from "@/hooks/use-toast";
 import MainLayout from "@/components/layout/main-layout";
+import { hasPermission, getEffectiveCurrency } from "@/lib/utils";
+import AdminSettingsPage from "@/pages/admin-settings-page";
 
 interface DashboardStats {
   users: {
@@ -39,6 +42,7 @@ interface DashboardStats {
     suspended: number;
     deleted: number;
     newLast7Days: number;
+    dailyActive: number;
   };
   expenses: {
     total: number;
@@ -54,6 +58,7 @@ interface DashboardStats {
     total: number;
     usersWithBudgets: number;
   };
+  totalTransactions: number;
   recentActivity: any[];
   topCategories: any[];
 }
@@ -70,9 +75,9 @@ export default function AdminPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<string>("all");
 
-  // Check if user is admin
+  // Check if user is admin (legacy) or has admin.access permission
   useEffect(() => {
-    if (user?.role !== "admin") {
+    if (user?.role !== "admin" && !hasPermission(user, 'admin.access')) {
       toast({
         title: "Access Denied",
         description: "You don't have permission to access the admin dashboard.",
@@ -91,7 +96,7 @@ export default function AdminPage() {
       }
       return response.json();
     },
-    enabled: user?.role === "admin" && selectedTab === "dashboard",
+  enabled: (user?.role === "admin" || hasPermission(user, 'admin.access')) && selectedTab === "dashboard",
   });
 
   // Fetch all users
@@ -104,7 +109,7 @@ export default function AdminPage() {
       }
       return response.json();
     },
-    enabled: user?.role === "admin" && selectedTab === "users",
+  enabled: (user?.role === "admin" || hasPermission(user, 'user.manage')) && selectedTab === "users",
   });
 
   // Admin actions
@@ -159,7 +164,7 @@ export default function AdminPage() {
       }
       return response.json();
     },
-    enabled: user?.role === "admin" && selectedTab === "expenses",
+  enabled: (user?.role === "admin" || hasPermission(user, 'expense.read') || hasPermission(user, 'expense.write')) && selectedTab === "expenses",
   });
 
   // Fetch all incomes (for admin view)
@@ -172,7 +177,7 @@ export default function AdminPage() {
       }
       return response.json();
     },
-    enabled: user?.role === "admin" && selectedTab === "incomes",
+  enabled: (user?.role === "admin" || hasPermission(user, 'income.read') || hasPermission(user, 'income.write')) && selectedTab === "incomes",
   });
 
   // Fetch all budgets (for admin view)
@@ -185,7 +190,7 @@ export default function AdminPage() {
       }
       return response.json();
     },
-    enabled: user?.role === "admin" && selectedTab === "budgets",
+  enabled: (user?.role === "admin" || hasPermission(user, 'budget.read') || hasPermission(user, 'budget.write')) && selectedTab === "budgets",
   });
 
   // Fetch all activity logs (for admin view)
@@ -199,7 +204,7 @@ export default function AdminPage() {
       const data = await response.json();
       return data.logs;
     },
-    enabled: user?.role === "admin" && selectedTab === "history",
+  enabled: (user?.role === "admin" || hasPermission(user, 'admin.access')) && selectedTab === "history",
   });
 
   // Delete user mutation
@@ -286,7 +291,7 @@ export default function AdminPage() {
     return matchesSearch && matchesStatus && matchesRole;
   });
 
-  if (user?.role !== "admin") {
+  if (user?.role !== "admin" && !hasPermission(user, 'admin.access')) {
     return (
       <MainLayout>
         <div className="container max-w-6xl mx-auto px-4 py-8">
@@ -332,34 +337,82 @@ export default function AdminPage() {
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh Data
             </Button>
+    <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (expenses && expenses.length) {
+                  const rows = expenses.map((e: any) => ({
+                    ...e,
+                    date: e.date,
+                    category: e.categoryName || 'Uncategorized'
+                  }));
+      exportExpensesToCSV(rows as any, getEffectiveCurrency(user || undefined));
+                }
+              }}
+            >
+              Export Expenses CSV
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (incomes && incomes.length) {
+                  const rows = incomes.map((i: any) => ({
+                    ...i,
+                    date: i.date,
+                    category: i.categoryName || 'Uncategorized'
+                  }));
+      exportIncomesToCSV(rows as any, getEffectiveCurrency(user || undefined));
+                }
+              }}
+            >
+              Export Incomes CSV
+            </Button>
           </div>
         </div>
 
         <Tabs value={selectedTab} onValueChange={setSelectedTab} className="space-y-6">
-          <TabsList className="grid grid-cols-6 max-w-2xl">
-            <TabsTrigger value="dashboard">
+          <TabsList className="grid grid-cols-8 max-w-4xl">
+    <TabsTrigger value="dashboard">
               <Home className="h-4 w-4 mr-2" />
               Dashboard
             </TabsTrigger>
-            <TabsTrigger value="users">
+    {hasPermission(user, 'user.manage') && (
+    <TabsTrigger value="users">
               <UserIcon className="h-4 w-4 mr-2" />
               Users
-            </TabsTrigger>
-            <TabsTrigger value="expenses">
+    </TabsTrigger>
+    )}
+    {(hasPermission(user, 'expense.read') || hasPermission(user, 'expense.write')) && (
+    <TabsTrigger value="expenses">
               <BarChart className="h-4 w-4 mr-2" />
               Expenses
-            </TabsTrigger>
-            <TabsTrigger value="incomes">
+    </TabsTrigger>
+    )}
+    {(hasPermission(user, 'income.read') || hasPermission(user, 'income.write')) && (
+    <TabsTrigger value="incomes">
               <DollarSign className="h-4 w-4 mr-2" />
               Incomes
-            </TabsTrigger>
-            <TabsTrigger value="budgets">
+    </TabsTrigger>
+    )}
+    {(hasPermission(user, 'budget.read') || hasPermission(user, 'budget.write')) && (
+    <TabsTrigger value="budgets">
               <PieChart className="h-4 w-4 mr-2" />
               Budgets
-            </TabsTrigger>
-            <TabsTrigger value="history">
+    </TabsTrigger>
+    )}
+    <TabsTrigger value="history">
               <History className="h-4 w-4 mr-2" />
               History
+            </TabsTrigger>
+    <TabsTrigger value="roles">
+              <ShieldCheck className="h-4 w-4 mr-2" />
+              Roles
+            </TabsTrigger>
+            <TabsTrigger value="system-settings">
+              <Settings className="h-4 w-4 mr-2" />
+              System Settings
             </TabsTrigger>
           </TabsList>
 
@@ -385,6 +438,16 @@ export default function AdminPage() {
                       </p>
                     </CardContent>
                   </Card>
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="text-sm font-medium">Daily Active Users</CardTitle>
+                      <UserIcon className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{dashboardStats.users.dailyActive}</div>
+                      <p className="text-xs text-muted-foreground">Active today</p>
+                    </CardContent>
+                  </Card>
 
                   <Card>
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -392,7 +455,7 @@ export default function AdminPage() {
                       <TrendingUp className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                      <div className="text-2xl font-bold">{formatCurrency(dashboardStats.expenses.totalAmount)}</div>
+                      <div className="text-2xl font-bold">{formatCurrency(dashboardStats.expenses.totalAmount, getEffectiveCurrency(user || undefined))}</div>
                       <p className="text-xs text-muted-foreground">
                         {dashboardStats.expenses.total} transactions
                       </p>
@@ -405,7 +468,7 @@ export default function AdminPage() {
                       <DollarSign className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                      <div className="text-2xl font-bold">{formatCurrency(dashboardStats.incomes.totalAmount)}</div>
+                      <div className="text-2xl font-bold">{formatCurrency(dashboardStats.incomes.totalAmount, getEffectiveCurrency(user || undefined))}</div>
                       <p className="text-xs text-muted-foreground">
                         {dashboardStats.incomes.total} transactions
                       </p>
@@ -422,6 +485,16 @@ export default function AdminPage() {
                       <p className="text-xs text-muted-foreground">
                         {dashboardStats.budgets.usersWithBudgets} users with budgets
                       </p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="text-sm font-medium">Total Transactions</CardTitle>
+                      <TrendingUp className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{dashboardStats.totalTransactions}</div>
+                      <p className="text-xs text-muted-foreground">Expenses + Incomes</p>
                     </CardContent>
                   </Card>
                 </div>
@@ -463,10 +536,27 @@ export default function AdminPage() {
                               <span className="text-sm">{category.name}</span>
                             </div>
                             <div className="text-sm font-medium">
-                              {formatCurrency(category.total_amount)}
+                              {formatCurrency(category.total_amount, getEffectiveCurrency(user || undefined))}
                             </div>
                           </div>
                         ))}
+                      </div>
+                      <div className="mt-4 flex gap-2">
+                        <Button variant="outline" size="sm" onClick={() => {
+                          if (budgets && budgets.length) exportBudgetsToCSV(budgets as any, getEffectiveCurrency(user || undefined));
+                        }}>Export Budgets CSV</Button>
+                        <Button variant="outline" size="sm" onClick={() => {
+                          if (expenses && expenses.length) {
+                            const rows = expenses.map((e: any) => ({...e, category: e.categoryName || 'Uncategorized'}));
+                            exportExpensesToPDF(rows as any);
+                          }
+                        }}>Export Expenses PDF</Button>
+                        <Button variant="outline" size="sm" onClick={() => {
+                          if (incomes && incomes.length) {
+                            const rows = incomes.map((i: any) => ({...i, category: i.categoryName || 'Uncategorized'}));
+                            exportIncomesToPDF(rows as any);
+                          }
+                        }}>Export Incomes PDF</Button>
                       </div>
                     </CardContent>
                   </Card>
@@ -567,6 +657,8 @@ export default function AdminPage() {
                               </span>
                             </TableCell>
                             <TableCell className="text-right">
+                              {/* Assign additional roles (RBAC) */}
+                              <AssignRoleButtons userId={user.id} />
                               {(user as any).status !== 'suspended' && (
                                 <Button variant="ghost" size="sm" title="Suspend" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'suspended' })}>
                                   <ShieldBan className="h-4 w-4" />
@@ -641,7 +733,7 @@ export default function AdminPage() {
                             <TableCell>{expense.description}</TableCell>
                             <TableCell>{expense.categoryName || "Uncategorized"}</TableCell>
                             <TableCell>{new Date(expense.date).toLocaleDateString()}</TableCell>
-                            <TableCell className="text-right">{formatCurrency(expense.amount)}</TableCell>
+                            <TableCell className="text-right">{formatCurrency(expense.amount, getEffectiveCurrency(user || undefined))}</TableCell>
                           </TableRow>
                         ))
                       ) : (
@@ -661,7 +753,8 @@ export default function AdminPage() {
                     <span className="font-medium">Total Expenses:</span>
                     <span className="font-medium">
                       {formatCurrency(
-                        expenses.reduce((sum: number, expense: any) => sum + expense.amount, 0)
+                        expenses.reduce((sum: number, expense: any) => sum + expense.amount, 0),
+                        getEffectiveCurrency(user || undefined)
                       )}
                     </span>
                   </div>
@@ -705,7 +798,7 @@ export default function AdminPage() {
                             <TableCell>{income.categoryName || "Uncategorized"}</TableCell>
                             <TableCell>{income.source || "N/A"}</TableCell>
                             <TableCell>{new Date(income.date).toLocaleDateString()}</TableCell>
-                            <TableCell className="text-right">{formatCurrency(income.amount)}</TableCell>
+                            <TableCell className="text-right">{formatCurrency(income.amount, getEffectiveCurrency(user || undefined))}</TableCell>
                           </TableRow>
                         ))
                       ) : (
@@ -725,7 +818,8 @@ export default function AdminPage() {
                     <span className="font-medium">Total Incomes:</span>
                     <span className="font-medium">
                       {formatCurrency(
-                        incomes.reduce((sum: number, income: any) => sum + income.amount, 0)
+                        incomes.reduce((sum: number, income: any) => sum + income.amount, 0),
+                        getEffectiveCurrency(user || undefined)
                       )}
                     </span>
                   </div>
@@ -771,7 +865,7 @@ export default function AdminPage() {
                             <TableCell>
                               {new Date(budget.startDate).toLocaleDateString()} - {new Date(budget.endDate).toLocaleDateString()}
                             </TableCell>
-                            <TableCell className="text-right">{formatCurrency(budget.amount)}</TableCell>
+                            <TableCell className="text-right">{formatCurrency(budget.amount, getEffectiveCurrency(user || undefined))}</TableCell>
                           </TableRow>
                         ))
                       ) : (
@@ -791,7 +885,8 @@ export default function AdminPage() {
                     <span className="font-medium">Total Budget Amount:</span>
                     <span className="font-medium">
                       {formatCurrency(
-                        budgets.reduce((sum: number, budget: any) => sum + budget.amount, 0)
+                        budgets.reduce((sum: number, budget: any) => sum + budget.amount, 0),
+                        getEffectiveCurrency(user || undefined)
                       )}
                     </span>
                   </div>
@@ -858,6 +953,24 @@ export default function AdminPage() {
               </CardContent>
             </Card>
           </TabsContent>
+
+          {/* ROLES TAB */}
+          <TabsContent value="roles">
+            <Card>
+              <CardHeader>
+                <CardTitle>Roles & Permissions</CardTitle>
+                <CardDescription>Manage custom roles and their permissions</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <RolesManager />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* SYSTEM SETTINGS TAB */}
+          <TabsContent value="system-settings">
+            <AdminSettingsPage embedded />
+          </TabsContent>
         </Tabs>
 
         {/* Delete User Confirmation Dialog */}
@@ -909,5 +1022,142 @@ export default function AdminPage() {
         </AlertDialog>
       </div>
     </MainLayout>
+  );
+}
+
+function AssignRoleButtons({ userId }: { userId: number }) {
+  const { data: roles } = useQuery({
+    queryKey: ["/api/admin/roles"],
+    queryFn: async () => {
+      const r = await fetch('/api/admin/roles');
+      if (!r.ok) throw new Error('Failed roles');
+      return r.json();
+    }
+  });
+  const { toast } = useToast();
+
+  const assign = async (roleId: number) => {
+    const resp = await fetch(`/api/admin/users/${userId}/roles`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roleId }) });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      toast({ title: 'Error', description: err.message || 'Failed to assign role', variant: 'destructive' });
+      return;
+    }
+    toast({ title: 'Role assigned' });
+  };
+
+  return (
+    <div className="inline-flex gap-1 mr-2">
+      {roles?.slice(0,3).map((r: any) => (
+        <Button key={r.id} variant="outline" size="sm" onClick={() => assign(r.id)}>
+          {r.name}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+// Inline RolesManager component
+function RolesManager() {
+  const { toast } = useToast();
+  const { data: roles, refetch: refetchRoles } = useQuery({
+    queryKey: ["/api/admin/roles"],
+    queryFn: async () => {
+      const r = await fetch('/api/admin/roles');
+      if (!r.ok) throw new Error('Failed to load roles');
+      return r.json();
+    }
+  });
+  const { data: permissions } = useQuery({
+    queryKey: ["/api/admin/permissions"],
+    queryFn: async () => {
+      const r = await fetch('/api/admin/permissions');
+      if (!r.ok) throw new Error('Failed to load permissions');
+      return r.json();
+    }
+  });
+
+  const [newRoleName, setNewRoleName] = useState("");
+  const [newRoleDesc, setNewRoleDesc] = useState("");
+  const [selectedRoleId, setSelectedRoleId] = useState<number | null>(null);
+  const [selectedPermIds, setSelectedPermIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    setSelectedPermIds([]);
+  }, [selectedRoleId]);
+
+  const createRole = async () => {
+    const name = newRoleName.trim();
+    if (!name) return;
+    const resp = await fetch('/api/admin/roles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: newRoleDesc })
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      toast({ title: 'Error', description: err.message || 'Failed to create role', variant: 'destructive' });
+      return;
+    }
+    setNewRoleName(''); setNewRoleDesc('');
+    await refetchRoles();
+    toast({ title: 'Role created' });
+  };
+
+  const applyPermissions = async () => {
+    if (!selectedRoleId) return;
+    const resp = await fetch(`/api/admin/roles/${selectedRoleId}/permissions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ permissionIds: selectedPermIds })
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      toast({ title: 'Error', description: err.message || 'Failed to assign permissions', variant: 'destructive' });
+      return;
+    }
+    toast({ title: 'Permissions updated' });
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="md:col-span-1">
+          <h3 className="font-medium mb-2">Create Role</h3>
+          <Input placeholder="Role name" value={newRoleName} onChange={e => setNewRoleName(e.target.value)} />
+          <Input className="mt-2" placeholder="Description (optional)" value={newRoleDesc} onChange={e => setNewRoleDesc(e.target.value)} />
+          <Button className="mt-2" onClick={createRole}>Create</Button>
+        </div>
+        <div className="md:col-span-2">
+          <h3 className="font-medium mb-2">Assign Permissions</h3>
+          <div className="flex items-center gap-2 mb-2">
+            <Select onValueChange={(v) => setSelectedRoleId(parseInt(v))}>
+              <SelectTrigger className="w-64"><SelectValue placeholder="Select role" /></SelectTrigger>
+              <SelectContent>
+                {roles?.map((r: any) => (
+                  <SelectItem key={r.id} value={String(r.id)}>{r.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" onClick={() => setSelectedPermIds([])}>Clear</Button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {permissions?.map((p: any) => (
+              <label key={p.id} className="flex items-center gap-2 border rounded p-2">
+                <input
+                  type="checkbox"
+                  checked={selectedPermIds.includes(p.id)}
+                  onChange={(e) => {
+                    setSelectedPermIds(prev => e.target.checked ? Array.from(new Set([...prev, p.id])) : prev.filter(id => id !== p.id));
+                  }}
+                />
+                <span>{p.name}</span>
+              </label>
+            ))}
+          </div>
+          <Button className="mt-3" onClick={applyPermissions} disabled={!selectedRoleId}>Save Permissions</Button>
+        </div>
+      </div>
+    </div>
   );
 }

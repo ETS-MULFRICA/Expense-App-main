@@ -52,16 +52,38 @@ async function dbAdmin(client: PoolClient) {
 }
 
 export async function runMigrationScript() {
-    const client = await getClient();
-    try {
-      const filePath = path.resolve(__dirname, '../database/schema.sql');
-      const sqlContent = fs.readFileSync(filePath, 'utf8');
-      await client.query(sqlContent);
-      await dbAdmin(client);
-      console.log(`SQL file '${filePath}' executed successfully.`);
-    } catch (err) {
-        console.error('Error executing SQL file:', err);
-    } finally {
-        client.release();
+  const client = await getClient();
+  try {
+    // 1) Apply base schema
+    const basePath = path.resolve(__dirname, '../database/schema.sql');
+    const baseSql = fs.readFileSync(basePath, 'utf8');
+    await client.query(baseSql);
+    console.log(`Base schema '${basePath}' executed successfully.`);
+
+    // 2) Apply all migrations (if any) in lexicographic order
+    const migrationsDir = path.resolve(__dirname, '../database/migrations');
+  if (fs.existsSync(migrationsDir)) {
+      const files = fs.readdirSync(migrationsDir)
+        .filter(f => f.endsWith('.sql'))
+        .sort();
+      for (const f of files) {
+        const full = path.join(migrationsDir, f);
+        const sql = fs.readFileSync(full, 'utf8');
+        try {
+          await client.query(sql);
+          console.log(`Migration '${f}' executed successfully.`);
+        } catch (e) {
+          console.warn(`Migration '${f}' failed or already applied:`, (e as any)?.message || e);
+      // Ensure the connection is not left in an aborted transaction state
+      try { await client.query('ROLLBACK'); } catch {}
+        }
+      }
     }
+
+    await dbAdmin(client);
+  } catch (err) {
+    console.error('Error executing SQL migrations:', err);
+  } finally {
+    client.release();
+  }
 }

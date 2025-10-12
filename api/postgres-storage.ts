@@ -274,6 +274,29 @@ export class PostgresStorage {
     await pool.query('UPDATE users SET role = $1 WHERE id = $2', [role, userId]);
   }
 
+  async getUserRoles(userId: number): Promise<{ id: number; name: string }[]> {
+    const result = await pool.query(
+      `SELECT r.id, r.name
+       FROM user_roles ur
+       JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id = $1`,
+      [userId]
+    );
+    return result.rows;
+  }
+
+  async getUserPermissions(userId: number): Promise<string[]> {
+    const result = await pool.query(
+      `SELECT DISTINCT p.name
+       FROM user_roles ur
+       JOIN role_permissions rp ON rp.role_id = ur.role_id
+       JOIN permissions p ON p.id = rp.permission_id
+       WHERE ur.user_id = $1`,
+      [userId]
+    );
+    return result.rows.map(r => r.name as string);
+  }
+
   async updateUserSettings(userId: number, settings: { currency?: string }): Promise<User> {
     const result = await pool.query(
       'UPDATE users SET currency = $1 WHERE id = $2 RETURNING *',

@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Search } from "lucide-react";
 import { formatCurrency } from "@/lib/currency-formatter";
+import { getEffectiveCurrency } from "@/lib/utils";
 
 // Map of category to icon color class (black and white only)
 const categoryIconColors: Record<string, string> = {
@@ -343,7 +344,7 @@ export default function RecentExpenses({
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {formatCurrency(expense.amount, user?.currency || 'XAF')}
+                        {formatCurrency(expense.amount, getEffectiveCurrency(user || undefined))}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <Button

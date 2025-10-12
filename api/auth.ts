@@ -187,18 +187,26 @@ export function setupAuth(app: Express) {
       const { password, ...userWithoutPassword } = user;
       
       // ADD THIS: Get user role and include it in response
-      storage.getUserRole(user.id).then(role => {
+      Promise.all([
+        storage.getUserRole(user.id),
+        storage.getUserPermissions(user.id).catch(() => [] as string[]),
+        pool.query('SELECT default_currency FROM app_settings WHERE id = 1').then(r => r.rows[0]?.default_currency).catch(() => undefined)
+      ]).then(([role, permissions, appDefaultCurrency]) => {
         return res.json({
           ...userWithoutPassword,
           role: role,
-          status: user.status
+          status: user.status,
+          permissions,
+          appDefaultCurrency
         });
       }).catch(error => {
-        console.error("Error getting user role:", error);
+        console.error("Error getting user role/permissions:", error);
         return res.json({
           ...userWithoutPassword,
           role: 'user',
-          status: user.status || 'active'
+          status: user.status || 'active',
+          permissions: [],
+          appDefaultCurrency: undefined
         });
       });
     });
@@ -217,12 +225,20 @@ export function setupAuth(app: Express) {
   
   // ADD THIS: Get user role
   const userRole = await storage.getUserRole(req.user.id);
+  const permissions = await storage.getUserPermissions(req.user.id).catch(() => [] as string[]);
+  let appDefaultCurrency: string | undefined;
+  try {
+    const r = await pool.query('SELECT default_currency FROM app_settings WHERE id = 1');
+    appDefaultCurrency = r.rows[0]?.default_currency;
+  } catch {}
   
   // Don't return password in response
   const { password, ...userWithoutPassword } = req.user;
   res.json({
     ...userWithoutPassword,
-    role: userRole
+    role: userRole,
+    permissions,
+    appDefaultCurrency
   });
 });
 }
