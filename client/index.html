@@ -5,6 +5,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ExpenseTrack - Manage Your Expenses</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    // Early theme apply to avoid flash of incorrect theme
+    (function() {
+      try {
+        var key = 'app:theme-mode';
+        var stored = localStorage.getItem(key);
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var mode = stored || 'system';
+        var isDark = mode === 'dark' || (mode === 'system' && prefersDark);
+        var root = document.documentElement;
+        if (isDark) {
+          root.classList.add('dark');
+        } else {
+          root.classList.remove('dark');
+        }
+      } catch (e) { /* no-op */ }
+    })();
+  </script>
 </head>
 <body>
   <div id="root"></div>

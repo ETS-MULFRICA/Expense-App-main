@@ -3118,7 +3118,9 @@ app.get("/api/admin/dashboard", requireAuth, requirePermission('admin.access'), 
       budgetsStats,
       recentActivity,
       topCategories,
-      dailyActive
+  dailyActive,
+  dailyActiveSeries,
+  expenseTrends
     ] = await Promise.all([
       // Users statistics - REMOVE THE COLUMNS THAT DON'T EXIST
       pool.query(`
@@ -3182,6 +3184,59 @@ app.get("/api/admin/dashboard", requireAuth, requirePermission('admin.access'), 
           SELECT user_id FROM incomes WHERE date >= CURRENT_DATE
         ) t
       `)
+      ,
+      // Daily Active Users time-series for last 30 days
+      pool.query(`
+        WITH series AS (
+          SELECT generate_series(CURRENT_DATE - INTERVAL '29 days', CURRENT_DATE, INTERVAL '1 day') AS day
+        ),
+        events AS (
+          SELECT date_trunc('day', created_at)::date AS day, user_id
+          FROM activity_log
+          WHERE created_at >= CURRENT_DATE - INTERVAL '29 days'
+          GROUP BY day, user_id
+          UNION
+          SELECT date_trunc('day', date)::date AS day, user_id
+          FROM expenses
+          WHERE date >= CURRENT_DATE - INTERVAL '29 days'
+          GROUP BY day, user_id
+          UNION
+          SELECT date_trunc('day', date)::date AS day, user_id
+          FROM incomes
+          WHERE date >= CURRENT_DATE - INTERVAL '29 days'
+          GROUP BY day, user_id
+        ),
+        agg AS (
+          SELECT day, COUNT(DISTINCT user_id) AS dau
+          FROM events
+          GROUP BY day
+        )
+        SELECT s.day::date AS date, COALESCE(a.dau, 0)::int AS value
+        FROM series s
+        LEFT JOIN agg a ON a.day = s.day::date
+        ORDER BY s.day
+      `)
+      ,
+      // Expense trends (transactions and total amount) for last 30 days
+      pool.query(`
+        WITH series AS (
+          SELECT generate_series(CURRENT_DATE - INTERVAL '29 days', CURRENT_DATE, INTERVAL '1 day') AS day
+        ),
+        e AS (
+          SELECT date_trunc('day', date)::date AS day,
+                 COUNT(*)::int AS transactions,
+                 COALESCE(SUM(amount), 0)::bigint AS total_amount
+          FROM expenses
+          WHERE date >= CURRENT_DATE - INTERVAL '29 days'
+          GROUP BY 1
+        )
+        SELECT s.day::date AS date,
+               COALESCE(e.transactions, 0)::int AS transactions,
+               COALESCE(e.total_amount, 0)::bigint AS total_amount
+        FROM series s
+        LEFT JOIN e ON e.day = s.day::date
+        ORDER BY s.day
+      `)
     ]);
 
     const dashboardData = {
@@ -3208,7 +3263,9 @@ app.get("/api/admin/dashboard", requireAuth, requirePermission('admin.access'), 
       },
       totalTransactions: parseInt(expensesStats.rows[0].total_expenses) + parseInt(incomesStats.rows[0].total_incomes),
       recentActivity: recentActivity.rows,
-      topCategories: topCategories.rows
+      topCategories: topCategories.rows,
+      dailyActiveSeries: dailyActiveSeries.rows,
+      expenseTrends: expenseTrends.rows
     };
 
   // Cache result

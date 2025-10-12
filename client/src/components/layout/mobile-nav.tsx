@@ -13,7 +13,10 @@ import {
   PieChart,
   ShieldAlert,
   CreditCard,
-  TrendingUp
+  TrendingUp,
+  Sun,
+  Moon,
+  Monitor
 } from "lucide-react";
 
 export default function MobileNav() {
@@ -22,6 +25,9 @@ export default function MobileNav() {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [location] = useLocation();
   const { user, logoutMutation } = useAuth();
+  const [themeMode, setThemeMode] = useState<'system'|'light'|'dark'>(() => {
+    try { return (localStorage.getItem('app:theme-mode') as any) || 'system'; } catch { return 'system'; }
+  });
 
   useEffect(() => {
     fetch('/api/admin/settings').then(r => r.ok ? r.json() : null).then(s => {
@@ -57,8 +63,36 @@ export default function MobileNav() {
     setIsMenuOpen(!isMenuOpen);
   };
 
+  const applyTheme = (mode: 'system'|'light'|'dark') => {
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const isDark = mode === 'dark' || (mode === 'system' && prefersDark);
+    document.documentElement.classList.toggle('dark', isDark);
+  };
+
+  useEffect(() => {
+    applyTheme(themeMode);
+    try { localStorage.setItem('app:theme-mode', themeMode); } catch {}
+    let mql: MediaQueryList | null = null;
+    const handle = () => applyTheme('system');
+    if (themeMode === 'system' && window.matchMedia) {
+      mql = window.matchMedia('(prefers-color-scheme: dark)');
+      if (typeof mql.addEventListener === 'function') mql.addEventListener('change', handle);
+      else if (typeof (mql as any).addListener === 'function') (mql as any).addListener(handle);
+    }
+    return () => {
+      if (mql) {
+        if (typeof mql.removeEventListener === 'function') mql.removeEventListener('change', handle);
+        else if (typeof (mql as any).removeListener === 'function') (mql as any).removeListener(handle);
+      }
+    };
+  }, [themeMode]);
+
+  const cycleTheme = () => {
+    setThemeMode(prev => prev === 'system' ? 'light' : prev === 'light' ? 'dark' : 'system');
+  };
+
   return (
-    <div className="lg:hidden bg-white w-full fixed top-0 z-10 border-b border-gray-200">
+    <div className="lg:hidden bg-white dark:bg-gray-900 w-full fixed top-0 z-10 border-b border-gray-200 dark:border-gray-800">
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center">
           {logoUrl ? (
@@ -68,19 +102,28 @@ export default function MobileNav() {
               <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 2H8.828a2 2 0 00-1.414.586L6.293 3.707A1 1 0 015.586 4H4zm6 9a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
             </svg>
           )}
-          <h1 className="ml-2 text-xl font-semibold text-gray-800">{siteName}</h1>
+          <h1 className="ml-2 text-xl font-semibold text-gray-800 dark:text-gray-200">{siteName}</h1>
         </div>
-        <button onClick={toggleMenu} className="text-gray-500 focus:outline-none">
-          {isMenuOpen ? (
-            <X className="h-6 w-6" />
-          ) : (
-            <Menu className="h-6 w-6" />
-          )}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={cycleTheme}
+            title={`Theme: ${themeMode}`}
+            className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+          >
+            {themeMode === 'light' ? <Sun className="h-5 w-5" /> : themeMode === 'dark' ? <Moon className="h-5 w-5" /> : <Monitor className="h-5 w-5" />}
+          </button>
+          <button onClick={toggleMenu} className="text-gray-500 dark:text-gray-300 focus:outline-none">
+            {isMenuOpen ? (
+              <X className="h-6 w-6" />
+            ) : (
+              <Menu className="h-6 w-6" />
+            )}
+          </button>
+        </div>
       </div>
       
       {isMenuOpen && (
-        <div className="bg-white px-4 pt-2 pb-4 border-b border-gray-200">
+        <div className="bg-white dark:bg-gray-900 px-4 pt-2 pb-4 border-b border-gray-200 dark:border-gray-800">
           <nav className="space-y-2">
             {navigation.map((item) => (
               <Link
@@ -89,8 +132,8 @@ export default function MobileNav() {
                 onClick={() => setIsMenuOpen(false)}
                 className={cn(
                   location === item.href
-                    ? "text-primary bg-primary/5"
-                    : "text-gray-600 hover:bg-gray-50",
+                    ? "text-primary bg-primary/5 dark:bg-primary/10"
+                    : "text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800",
                   "flex items-center px-3 py-2 rounded-md font-medium"
                 )}
               >
@@ -99,15 +142,15 @@ export default function MobileNav() {
               </Link>
             ))}
             
-            <div className="border-t border-gray-200 my-2"></div>
+            <div className="border-t border-gray-200 dark:border-gray-800 my-2"></div>
             
             <div className="flex items-center px-3 py-2">
               <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center text-primary font-medium">
                 {user?.name.charAt(0)}
               </div>
               <div className="ml-3">
-                <p className="text-sm font-medium text-gray-700">{user?.name}</p>
-                <p className="text-xs text-gray-500">{user?.email}</p>
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-200">{user?.name}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">{user?.email}</p>
               </div>
             </div>
             
@@ -116,7 +159,7 @@ export default function MobileNav() {
                 logoutMutation.mutate();
                 setIsMenuOpen(false);
               }}
-              className="flex items-center text-gray-600 hover:bg-gray-50 px-3 py-2 rounded-md font-medium w-full"
+              className="flex items-center text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 px-3 py-2 rounded-md font-medium w-full"
             >
               <LogOut className="h-5 w-5 mr-2" />
               Logout

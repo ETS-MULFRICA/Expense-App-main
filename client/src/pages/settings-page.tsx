@@ -11,12 +11,39 @@ import { useToast } from "@/hooks/use-toast";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function SettingsPage() {
   const { user, logoutMutation } = useAuth();
   const { toast } = useToast();
   const [currency, setCurrency] = useState(user?.currency || "XAF");
+  const [themeMode, setThemeMode] = useState<'system'|'light'|'dark'>(() => {
+    try { return (localStorage.getItem('app:theme-mode') as any) || 'system'; } catch { return 'system'; }
+  });
+
+  const applyTheme = (mode: 'system'|'light'|'dark') => {
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const isDark = mode === 'dark' || (mode === 'system' && prefersDark);
+    document.documentElement.classList.toggle('dark', isDark);
+  };
+
+  useEffect(() => {
+    applyTheme(themeMode);
+    try { localStorage.setItem('app:theme-mode', themeMode); } catch {}
+    let mql: MediaQueryList | null = null;
+    const handle = () => applyTheme('system');
+    if (themeMode === 'system' && window.matchMedia) {
+      mql = window.matchMedia('(prefers-color-scheme: dark)');
+      if (typeof mql.addEventListener === 'function') mql.addEventListener('change', handle);
+      else if (typeof (mql as any).addListener === 'function') (mql as any).addListener(handle);
+    }
+    return () => {
+      if (mql) {
+        if (typeof mql.removeEventListener === 'function') mql.removeEventListener('change', handle);
+        else if (typeof (mql as any).removeListener === 'function') (mql as any).removeListener(handle);
+      }
+    };
+  }, [themeMode]);
   
   // Currency update mutation
   const updateCurrencyMutation = useMutation({
@@ -171,6 +198,31 @@ export default function SettingsPage() {
                   </CardContent>
                 </Card>
                 
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Appearance</CardTitle>
+                    <CardDescription>
+                      Choose your theme preference
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2">
+                      <Label htmlFor="theme">Theme</Label>
+                      <Select value={themeMode} onValueChange={(v)=>setThemeMode(v as any)}>
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Select theme" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="system">System</SelectItem>
+                          <SelectItem value="light">Light</SelectItem>
+                          <SelectItem value="dark">Dark</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-sm text-gray-500 mt-2">Applies immediately and is saved to this device.</p>
+                    </div>
+                  </CardContent>
+                </Card>
+
                 <Card>
                   <CardHeader>
                     <CardTitle>Notification Settings</CardTitle>

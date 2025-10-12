@@ -22,9 +22,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
   const [language, setLanguage] = useState('en');
   const [timezone, setTimezone] = useState('UTC');
   const [dateFormat, setDateFormat] = useState('yyyy-MM-dd');
-  // Branding
-  const [primaryColor, setPrimaryColor] = useState('#0ea5e9');
-  const [themeMode, setThemeMode] = useState<'light'|'dark'|'system'>('system');
+  // Branding (theme now user-controlled; no admin control here)
   // Email
   const [emailFrom, setEmailFrom] = useState('');
   const [emailTemplates, setEmailTemplates] = useState<any>({});
@@ -49,8 +47,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
         setLanguage(s.language ?? 'en');
         setTimezone(s.timezone ?? 'UTC');
         setDateFormat(s.date_format ?? 'yyyy-MM-dd');
-        setPrimaryColor(s.primary_color ?? '#0ea5e9');
-        setThemeMode((s.theme_mode as any) ?? 'system');
+  // themeMode removed from admin settings
         setEmailFrom(s.email_from ?? '');
         setEmailTemplates(s.email_templates ?? {});
         setFeatures(s.features ?? { allowRegistration: true, announcements: true, moderation: true, backups: true, reports: true });
@@ -87,7 +84,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates,
-        timezone, dateFormat, primaryColor, themeMode, faviconDataUrl, features, security
+  timezone, dateFormat, faviconDataUrl, features, security
       })
     });
     if (!resp.ok) {
@@ -110,8 +107,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       language,
       timezone,
       date_format: dateFormat,
-      primary_color: primaryColor,
-      theme_mode: themeMode,
+  // theme_mode removed from admin page
       email_from: emailFrom,
       email_templates: emailTemplates,
       features,
@@ -125,14 +121,13 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       language: initial.language,
       timezone: initial.timezone,
       date_format: initial.date_format,
-      primary_color: initial.primary_color,
-      theme_mode: initial.theme_mode,
+  // theme_mode removed
       email_from: initial.email_from,
       email_templates: initial.email_templates,
       features: initial.features,
       security: initial.security,
     });
-  }, [initial, siteName, logoDataUrl, faviconDataUrl, defaultCurrency, language, timezone, dateFormat, primaryColor, themeMode, emailFrom, emailTemplates, features, security]);
+  }, [initial, siteName, logoDataUrl, faviconDataUrl, defaultCurrency, language, timezone, dateFormat, emailFrom, emailTemplates, features, security]);
 
   if (loading) return embedded ? <div className='p-6'>Loading…</div> : <MainLayout><div className='p-6'>Loading…</div></MainLayout>;
 
@@ -145,8 +140,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     setLanguage(initial.language ?? 'en');
     setTimezone(initial.timezone ?? 'UTC');
     setDateFormat(initial.date_format ?? 'yyyy-MM-dd');
-    setPrimaryColor(initial.primary_color ?? '#0ea5e9');
-    setThemeMode((initial.theme_mode as any) ?? 'system');
+  // theme_mode removed
     setEmailFrom(initial.email_from ?? '');
     setEmailTemplates(initial.email_templates ?? {});
     setFeatures(initial.features ?? { allowRegistration: true, announcements: true, moderation: true, backups: true, reports: true });
@@ -166,6 +160,8 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     </Card>
   );
 
+  // Theme is user-controlled in personal settings; no hooks here to avoid hook-order issues.
+
   const content = (
     <div className='container max-w-6xl mx-auto px-4 py-6'>
       <div className='flex items-center justify-between mb-3'>
@@ -182,7 +178,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       <Tabs defaultValue='site'>
         <TabsList className='grid grid-cols-3 md:grid-cols-6'>
           <TabsTrigger value='site'>Site Info</TabsTrigger>
-          <TabsTrigger value='branding'>Branding & Theme</TabsTrigger>
+          <TabsTrigger value='appearance'>Appearance</TabsTrigger>
           <TabsTrigger value='localization'>Localization</TabsTrigger>
           <TabsTrigger value='email'>Email</TabsTrigger>
           <TabsTrigger value='security'>Security</TabsTrigger>
@@ -223,15 +219,19 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
             </div>
           </Section>
         </TabsContent>
-        <TabsContent value='branding' className='space-y-4 mt-4'>
-          <Section title='Branding & Theme' badge={modified ? 'Modified' : undefined}>
-            <div>
-              <Label>Primary Color</Label>
-              <Input type='color' value={primaryColor} onChange={e=>setPrimaryColor(e.target.value)} className='h-10 w-24 p-1' />
-            </div>
+        <TabsContent value='appearance' className='space-y-4 mt-4'>
+          <Section title='Appearance' badge={undefined}>
             <div>
               <Label>Theme Mode</Label>
-              <Select value={themeMode} onValueChange={(v)=>setThemeMode(v as any)}>
+              <Select
+                onValueChange={(v)=>{
+                  try{ localStorage.setItem('app:theme-mode', v); }catch{}
+                  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                  const isDark = v === 'dark' || (v === 'system' && prefersDark);
+                  document.documentElement.classList.toggle('dark', isDark);
+                }}
+                defaultValue={(typeof window!=='undefined' && localStorage.getItem('app:theme-mode')) || 'system'}
+              >
                 <SelectTrigger><SelectValue placeholder='Theme mode' /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value='system'>System</SelectItem>
@@ -239,9 +239,11 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
                   <SelectItem value='dark'>Dark</SelectItem>
                 </SelectContent>
               </Select>
+              <p className='text-xs text-gray-500 mt-1'>Personal preference. Applies to this device.</p>
             </div>
           </Section>
         </TabsContent>
+  {/* Branding & Theme removed from admin; theme is set per-user in personal settings */}
         <TabsContent value='localization' className='space-y-4 mt-4'>
           <Section title='Localization' badge={modified ? 'Modified' : undefined}>
             <div>
