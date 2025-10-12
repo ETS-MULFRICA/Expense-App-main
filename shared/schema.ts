@@ -10,6 +10,10 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   currency: text("currency").default('XAF'),
   role: text("role").default('user'),
+  status: text("status").default('active'),
+  suspendedAt: timestamp("suspended_at"),
+  deletedAt: timestamp("deleted_at"),
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 // Main categories table
@@ -107,12 +111,9 @@ export const budgetAllocations = pgTable("budget_allocations", {
 });
 
 // Zod schemas for validation
-export const insertUserSchema = createInsertSchema(users).pick({
-  username: true,
-  password: true,
-  name: true,
-  email: true,
-});
+export const insertUserSchema = createInsertSchema(users)
+  .pick({ username: true, password: true, name: true, email: true })
+  .extend({ role: z.enum(['user','admin']).optional() });
 
 // Category schemas
 export const insertExpenseCategorySchema = createInsertSchema(expenseCategories).pick({

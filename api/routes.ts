@@ -30,18 +30,26 @@ const requireAuth = async (req: Request, res: Response, next: Function) => {
     return res.sendStatus(401);
   }
   try {
-    // Check user existence in DB on every request
     const userId = req.user.id;
-    const result = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
-    if (result.rowCount === 0) {
-      // User not found in DB
-      req.logout?.(() => {});
-      return res.sendStatus(401);
+    try {
+      // Prefer status-aware auth if the column exists
+      const result = await pool.query('SELECT id, status FROM users WHERE id = $1', [userId]);
+      if (result.rowCount === 0) {
+        req.logout?.(() => {});
+        return res.sendStatus(401);
+      }
+      const status = result.rows[0].status as string | undefined;
+      if (status === 'suspended') return res.status(403).json({ message: 'Account suspended' });
+      if (status === 'deleted') return res.status(403).json({ message: 'Account deleted' });
+    } catch (e: any) {
+      // If the status column doesn't exist yet, skip the status check (compat mode)
+      if (e?.code !== '42703') {
+        throw e;
+      }
     }
-    next();
-  } catch (err) {
-    // DB error (e.g., DB is down)
-    return res.status(503).json({ message: "Authentication unavailable: database error" });
+    return next();
+  } catch (_err) {
+    return res.status(503).json({ message: 'Authentication unavailable: database error' });
   }
 };
 
@@ -231,6 +239,33 @@ app.post("/api/user-income-categories", requireAuth, async (req, res) => {
         console.error("Error creating expense category:", error);
         res.status(500).json({ message: "Failed to create expense category" });
       }
+    }
+  });
+
+  // Create a private (user-defined) expense category quickly from input
+  app.post("/api/user-expense-categories", requireAuth, async (req, res) => {
+    try {
+      const name = (req.body?.name || "").trim();
+      const description = (req.body?.description || null);
+      if (!name) {
+        return res.status(400).json({ message: "Category name is required" });
+      }
+      // Prevent duplicates for this user (case-insensitive)
+      const dup = await pool.query(
+        'SELECT 1 FROM expense_categories WHERE user_id = $1 AND LOWER(name) = LOWER($2)',
+        [req.user!.id, name]
+      );
+      if (dup.rowCount && dup.rowCount > 0) {
+        return res.status(409).json({ message: "Category already exists" });
+      }
+      const result = await pool.query(
+        'INSERT INTO expense_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, false) RETURNING *',
+        [req.user!.id, name, description]
+      );
+      return res.status(201).json(result.rows[0]);
+    } catch (error) {
+      console.error("Error creating user expense category:", error);
+      return res.status(500).json({ message: "Failed to create user expense category" });
     }
   });
   
@@ -1138,12 +1173,30 @@ app.get("/api/budgets", requireAuth, async (req, res) => {
     // Add performance data to each budget
     const budgetsWithPerformance = await Promise.all(
       budgets.map(async (budget) => {
-        const performance = await storage.getBudgetPerformance(budget.id);
+        const [performance, allocations] = await Promise.all([
+          storage.getBudgetPerformance(budget.id),
+          storage.getBudgetAllocations(budget.id)
+        ]);
+
+        // Collect unique category IDs from allocations
+        const uniqueCategoryIds = Array.from(new Set((allocations || []).map(a => a.categoryId)));
+        let categoryNames: string[] = [];
+        if (uniqueCategoryIds.length > 0) {
+          const namesResult = await pool.query(
+            'SELECT id, name FROM expense_categories WHERE id = ANY($1::int[])',
+            [uniqueCategoryIds]
+          );
+          const nameById = new Map<number, string>(namesResult.rows.map((r: any) => [r.id, r.name]));
+          categoryNames = uniqueCategoryIds.map(id => nameById.get(id) || String(id));
+        }
+
         return {
           ...budget,
           allocatedAmount: performance.allocated,
           spentAmount: performance.spent,
-          remainingAmount: performance.remaining
+          remainingAmount: performance.remaining,
+          categoryNames,
+          categoryCount: categoryNames.length,
         };
       })
     );
@@ -2102,10 +2155,10 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
   try {
     const users = await storage.getAllUsers();
     // Remove passwords from response
-    const safeUsers = users.map(({ password, ...user }) => ({
+    const safeUsers = await Promise.all(users.map(async ({ password, ...user }) => ({
       ...user,
-      role: storage.getUserRole(user.id)
-    }));
+      role: await storage.getUserRole(user.id)
+    })));
     
     // Log activity for admin viewing users
     try {
@@ -2130,6 +2183,93 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
   } catch (error) {
     console.error("Error fetching users:", error);
     res.status(500).json({ message: "Failed to fetch users" });
+  }
+});
+
+// Create user (admin)
+app.post("/api/admin/users", requireAdmin, async (req, res) => {
+  try {
+    const { username, name, email, role = 'user' } = req.body;
+    const tempPassword = req.body.password || Math.random().toString(36).slice(-10);
+    if (!username || !name || !email) {
+      return res.status(400).json({ message: "username, name, and email are required" });
+    }
+    // Check exists
+    const existing = await pool.query('SELECT id FROM users WHERE username = $1 OR email = $2', [username, email]);
+    if (existing.rowCount && existing.rowCount > 0) {
+      return res.status(409).json({ message: "User with same username or email exists" });
+    }
+    // Hash password
+    const { hashPassword } = await import('./password');
+    const hashed = await hashPassword(tempPassword);
+    const result = await pool.query(
+      'INSERT INTO users (username, password, name, email, role, status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, username, name, email, role, status, created_at',
+      [username, hashed, name, email, role, 'active']
+    );
+    const user = result.rows[0];
+    // Create default categories for the new user
+    await storage.createDefaultCategories(user.id);
+    try {
+      await logActivity({
+        userId: req.user!.id,
+        actionType: 'CREATE',
+        resourceType: 'USER',
+        resourceId: user.id,
+        description: `Admin created user \"${username}\" (${email})`,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { adminAction: 'create-user', role, tempPassword: true }
+      });
+    } catch {}
+    res.status(201).json({ ...user, temporaryPassword: tempPassword });
+  } catch (error) {
+    console.error('Error creating user:', error);
+    res.status(500).json({ message: 'Failed to create user' });
+  }
+});
+
+// Suspend or activate user
+app.patch('/api/admin/users/:id/status', requireAdmin, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const { status } = req.body as { status: 'active'|'suspended'|'deleted' };
+    if (!['active','suspended','deleted'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+    if (userId === req.user!.id) {
+      return res.status(400).json({ message: 'Cannot change your own status' });
+    }
+    const existing = await storage.getUser(userId);
+    if (!existing) return res.status(404).json({ message: 'User not found' });
+    const now = new Date();
+    await pool.query(
+      `UPDATE users SET status = $1, suspended_at = CASE WHEN $1='suspended' THEN $2 ELSE NULL END,
+       deleted_at = CASE WHEN $1='deleted' THEN $2 ELSE NULL END WHERE id = $3`,
+      [status, now, userId]
+    );
+    try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'USER', resourceId: userId, description: `Admin set status to ${status} for ${existing.username}`, ipAddress: req.ip, userAgent: req.get('User-Agent'), metadata: { adminAction: 'update-status', status } }); } catch {}
+    res.json({ message: 'Status updated' });
+  } catch (error) {
+    console.error('Error updating user status:', error);
+    res.status(500).json({ message: 'Failed to update user status' });
+  }
+});
+
+// Reset user password (admin)
+app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const user = await storage.getUser(userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const newPassword = req.body.password || Math.random().toString(36).slice(-10);
+    const { hashPassword } = await import('./password');
+    const hashed = await hashPassword(newPassword);
+    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, userId]);
+    try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'USER', resourceId: userId, description: `Admin reset password for ${user.username}`, ipAddress: req.ip, userAgent: req.get('User-Agent'), metadata: { adminAction: 'reset-password' } }); } catch {}
+    res.json({ message: 'Password reset', temporaryPassword: newPassword });
+  } catch (error) {
+    console.error('Error resetting password:', error);
+    res.status(500).json({ message: 'Failed to reset password' });
   }
 });
 
@@ -2422,14 +2562,8 @@ app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
       return res.status(400).json({ message: "Cannot delete your own account" });
     }
     
-    // Here we would implement user deletion
-    // For now, we'll just return a success message
-    // In a real implementation, this would include:
-    // 1. Deleting user's expenses
-    // 2. Deleting user's incomes
-    // 3. Deleting user's budgets
-    // 4. Deleting user's categories
-    // 5. Finally deleting the user
+  // Soft-delete: mark as deleted and set deleted_at timestamp
+  await pool.query(`UPDATE users SET status = 'deleted', deleted_at = NOW(), suspended_at = NULL WHERE id = $1`, [userId]);
     
     // Log activity for admin deleting user
     try {
@@ -2453,7 +2587,7 @@ app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
       console.error('Failed to log admin delete user activity:', logError);
     }
     
-    res.status(200).json({ message: "User deleted successfully" });
+  res.status(200).json({ message: "User soft-deleted successfully" });
   } catch (error) {
     console.error("Error deleting user:", error);
     res.status(500).json({ message: "Failed to delete user" });

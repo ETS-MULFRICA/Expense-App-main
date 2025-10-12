@@ -62,6 +62,8 @@ function Router() {
       <ProtectedRoute path="/history" component={HistoryPage} />
       {/* Admin panel - requires admin role */}
       <ProtectedRoute path="/admin" component={AdminPage} requiredRole="admin" />
+  {/* Admin nested routes (e.g., /admin/announcements) - requires admin role */}
+  <ProtectedRoute path="/admin/:rest*" component={AdminPage} requiredRole="admin" />
       {/* Public authentication page (login/signup) */}
       <Route path="/auth" component={AuthPage} />
       {/* 404 fallback for unmatched routes */}

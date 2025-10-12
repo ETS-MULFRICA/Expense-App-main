@@ -27,7 +27,7 @@ import {
 import { formatCurrency } from "@/lib/currency-formatter";
 import { 
   Loader2, PieChart, BarChart, User as UserIcon, Search, UserPlus, Trash2, 
-  Edit, RefreshCw, Home, DollarSign, History, FileText, TrendingUp 
+  Edit, RefreshCw, Home, DollarSign, History, FileText, TrendingUp, ShieldBan, ShieldCheck, KeyRound 
 } from "lucide-react";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -65,6 +65,10 @@ export default function AdminPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [newUser, setNewUser] = useState({ username: "", name: "", email: "", role: "user" });
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [roleFilter, setRoleFilter] = useState<string>("all");
 
   // Check if user is admin
   useEffect(() => {
@@ -101,6 +105,48 @@ export default function AdminPage() {
       return response.json();
     },
     enabled: user?.role === "admin" && selectedTab === "users",
+  });
+
+  // Admin actions
+  const createUserMutation = useMutation({
+    mutationFn: async (payload: any) => {
+      const response = await fetch(`/api/admin/users`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!response.ok) throw new Error('Failed to create user');
+      return response.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      toast({ title: "User Created", description: `Temporary password: ${data.temporaryPassword}` });
+      setIsCreating(false);
+      setNewUser({ username: "", name: "", email: "", role: "user" });
+    },
+    onError: (e: any) => toast({ title: 'Error', description: e.message, variant: 'destructive' })
+  });
+
+  const updateStatusMutation = useMutation({
+    mutationFn: async ({ userId, status }: { userId: number; status: 'active'|'suspended'|'deleted' }) => {
+      const response = await fetch(`/api/admin/users/${userId}/status`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+      if (!response.ok) throw new Error('Failed to update status');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/dashboard"] });
+      toast({ title: 'Status Updated', description: 'User status updated.' });
+    },
+    onError: (e: any) => toast({ title: 'Error', description: e.message, variant: 'destructive' })
+  });
+
+  const resetPasswordMutation = useMutation({
+    mutationFn: async (userId: number) => {
+      const response = await fetch(`/api/admin/users/${userId}/reset-password`, { method: 'POST' });
+      if (!response.ok) throw new Error('Failed to reset password');
+      return response.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: 'Password Reset', description: `Temporary password: ${data.temporaryPassword}` });
+    },
+    onError: (e: any) => toast({ title: 'Error', description: e.message, variant: 'destructive' })
   });
 
   // Fetch all expenses (for admin view)
@@ -231,11 +277,14 @@ export default function AdminPage() {
   };
 
   // Filter users based on search query
-  const filteredUsers = users?.filter(user => 
-    user.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    user.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    user.email.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredUsers = users?.filter(user => {
+    const matchesSearch = user.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      user.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      user.email.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesStatus = statusFilter === 'all' ? true : (user as any).status === statusFilter;
+    const matchesRole = roleFilter === 'all' ? true : (user.role || 'user') === roleFilter;
+    return matchesSearch && matchesStatus && matchesRole;
+  });
 
   if (user?.role !== "admin") {
     return (
@@ -451,7 +500,24 @@ export default function AdminPage() {
                       onChange={(e) => setSearchQuery(e.target.value)}
                     />
                   </div>
-                  <Button>
+                  <Select value={roleFilter} onValueChange={setRoleFilter}>
+                    <SelectTrigger className="w-32"><SelectValue placeholder="Role" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Roles</SelectItem>
+                      <SelectItem value="user">User</SelectItem>
+                      <SelectItem value="admin">Admin</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={statusFilter} onValueChange={setStatusFilter}>
+                    <SelectTrigger className="w-36"><SelectValue placeholder="Status" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Status</SelectItem>
+                      <SelectItem value="active">Active</SelectItem>
+                      <SelectItem value="suspended">Suspended</SelectItem>
+                      <SelectItem value="deleted">Deleted</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button onClick={() => setIsCreating(true)}>
                     <UserPlus className="h-4 w-4 mr-2" />
                     Add User
                   </Button>
@@ -470,6 +536,7 @@ export default function AdminPage() {
                         <TableHead>Name</TableHead>
                         <TableHead>Email</TableHead>
                         <TableHead>Role</TableHead>
+                        <TableHead>Status</TableHead>
                         <TableHead className="text-right">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -494,7 +561,25 @@ export default function AdminPage() {
                                 </SelectContent>
                               </Select>
                             </TableCell>
+                            <TableCell>
+                              <span className={`text-xs px-2 py-1 rounded-full ${ (user as any).status === 'active' ? 'bg-green-100 text-green-800' : (user as any).status === 'suspended' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-200 text-gray-700' }`}>
+                                {(user as any).status || 'active'}
+                              </span>
+                            </TableCell>
                             <TableCell className="text-right">
+                              {(user as any).status !== 'suspended' && (
+                                <Button variant="ghost" size="sm" title="Suspend" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'suspended' })}>
+                                  <ShieldBan className="h-4 w-4" />
+                                </Button>
+                              )}
+                              {(user as any).status === 'suspended' && (
+                                <Button variant="ghost" size="sm" title="Activate" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'active' })}>
+                                  <ShieldCheck className="h-4 w-4" />
+                                </Button>
+                              )}
+                              <Button variant="ghost" size="sm" title="Reset Password" onClick={() => resetPasswordMutation.mutate(user.id)}>
+                                <KeyRound className="h-4 w-4" />
+                              </Button>
                               <Button
                                 variant="ghost"
                                 size="sm"
@@ -511,7 +596,7 @@ export default function AdminPage() {
                         ))
                       ) : (
                         <TableRow>
-                          <TableCell colSpan={5} className="text-center py-4 text-gray-500">
+                          <TableCell colSpan={6} className="text-center py-4 text-gray-500">
                             No users found
                           </TableCell>
                         </TableRow>
@@ -793,6 +878,32 @@ export default function AdminPage() {
               >
                 Delete
               </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Create User Dialog */}
+        <AlertDialog open={isCreating} onOpenChange={setIsCreating}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Create New User</AlertDialogTitle>
+              <AlertDialogDescription>Enter details for the new user. A temporary password will be generated if not provided.</AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="space-y-4 py-2">
+              <Input placeholder="Username" value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} />
+              <Input placeholder="Full name" value={newUser.name} onChange={(e) => setNewUser({ ...newUser, name: e.target.value })} />
+              <Input placeholder="Email" type="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
+              <Select value={newUser.role} onValueChange={(v) => setNewUser({ ...newUser, role: v })}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Role" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">User</SelectItem>
+                  <SelectItem value="admin">Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => createUserMutation.mutate(newUser)}>Create</AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>

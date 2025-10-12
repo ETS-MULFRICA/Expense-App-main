@@ -32,6 +32,8 @@ export default function AddExpenseDialog({ isOpen, onClose }: AddExpenseDialogPr
   const { toast } = useToast();
   const { user } = useAuth();
   const currencySymbol = user?.currency ? currencySymbols[user.currency] : 'FCFA';
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [isCreatingCategory, setIsCreatingCategory] = useState(false);
   
   // Fetch expense categories from the database
   const { 
@@ -94,6 +96,33 @@ export default function AddExpenseDialog({ isOpen, onClose }: AddExpenseDialogPr
 
   const onSubmit = (data: InsertExpense) => {
     addExpenseMutation.mutate(data);
+  };
+
+  const handleCreateCategory = async () => {
+    const name = newCategoryName.trim();
+    if (!name) return;
+    try {
+      setIsCreatingCategory(true);
+      const resp = await fetch("/api/user-expense-categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.message || "Failed to create category");
+      }
+      const created = await resp.json();
+      // Refresh list and select the new category
+      await queryClient.invalidateQueries({ queryKey: ["/api/expense-categories"] });
+      form.setValue("categoryId", created.id, { shouldValidate: true });
+      setNewCategoryName("");
+      toast({ title: "Category added", description: `Created "${created.name}"` });
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message || String(e), variant: "destructive" });
+    } finally {
+      setIsCreatingCategory(false);
+    }
   };
 
   return (
@@ -204,6 +233,21 @@ export default function AddExpenseDialog({ isOpen, onClose }: AddExpenseDialogPr
                       ))}
                     </SelectContent>
                   </Select>
+                  <div className="flex items-center gap-2 mt-2">
+                    <Input
+                      placeholder="Or type a custom category"
+                      value={newCategoryName}
+                      onChange={(e) => setNewCategoryName(e.target.value)}
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={handleCreateCategory}
+                      disabled={isCreatingCategory || !newCategoryName.trim()}
+                    >
+                      {isCreatingCategory ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
+                    </Button>
+                  </div>
                   <FormMessage />
                 </FormItem>
               )}

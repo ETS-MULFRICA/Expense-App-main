@@ -63,15 +63,39 @@ export function setupAuth(app: Express) {
       try {
         const result = await client.query('SELECT * FROM users WHERE username = $1', [username]);
         const user = result.rows[0];
-        console.log("Authenticating user:",{ user, username, password });
-        const check = await comparePasswords(password, user.password);
-        console.log("Password check result:", check);
-        console.log("Hashed password:", await hashPassword(password));
-        if (!user || !check) {
-          return done(null, false);
+        console.log("Authenticating user:",{ user, username });
+        if (!user) return done(null, false);
+        // Block suspended or deleted users (if status column exists)
+        try {
+          if (user.status === 'suspended') {
+            return done(null, false);
+          }
+          if (user.status === 'deleted') {
+            return done(null, false);
+          }
+        } catch {}
+
+        let ok = false;
+        // If stored password has our scrypt format (hash.salt), verify
+        if (typeof user.password === 'string' && user.password.includes('.')) {
+          ok = await comparePasswords(password, user.password);
         } else {
-          return done(null, user);
+          // Backward-compatible: treat stored as plaintext
+          ok = password === user.password;
+          if (ok) {
+            // Upgrade to hashed password silently
+            const newHash = await hashPassword(password);
+            try {
+              await client.query('UPDATE users SET password = $1 WHERE id = $2', [newHash, user.id]);
+              user.password = newHash;
+            } catch (e) {
+              console.warn('Failed to upgrade password hash for user', user.id, e);
+            }
+          }
         }
+        console.log("Password check result:", ok);
+        if (!ok) return done(null, false);
+        return done(null, user);
       } catch (err) {
         return done(err);
       } finally {
@@ -118,8 +142,8 @@ export function setupAuth(app: Express) {
     console.log(hashedPassword);
     console.log("Inserting user into database:", { username, name, email });
     const insertResult = await client.query(
-      'INSERT INTO users (username, password, name, email) VALUES ($1, $2, $3, $4) RETURNING id, username, name, email',
-      [username, hashedPassword, name, email]
+      'INSERT INTO users (username, password, name, email, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, name, email, role, status',
+      [username, hashedPassword, name, email, 'user', 'active']
     );
     const user = insertResult.rows[0];
     console.log("Created new user:", user);
@@ -132,7 +156,8 @@ export function setupAuth(app: Express) {
       const { password, ...userWithoutPassword } = user;
       res.status(201).json({
         ...userWithoutPassword,
-        role: 'user' // New users are regular users by default
+        role: 'user',
+        status: 'active'
       });
     });
   } catch (error) {
@@ -165,13 +190,15 @@ export function setupAuth(app: Express) {
       storage.getUserRole(user.id).then(role => {
         return res.json({
           ...userWithoutPassword,
-          role: role // Include the role in the response
+          role: role,
+          status: user.status
         });
       }).catch(error => {
         console.error("Error getting user role:", error);
         return res.json({
           ...userWithoutPassword,
-          role: 'user' // Default to 'user' if there's an error
+          role: 'user',
+          status: user.status || 'active'
         });
       });
     });

@@ -64,6 +64,8 @@ export default function CreateBudgetDialog({
   const [isPeriodCustom, setIsPeriodCustom] = useState(false);
   const [selectedCategories, setSelectedCategories] = useState<number[]>([]);
   const [categoryError, setCategoryError] = useState<string>("");
+  const [newCategoryName, setNewCategoryName] = useState<string>("");
+  const [isCreatingCategory, setIsCreatingCategory] = useState<boolean>(false);
   const { toast } = useToast();
   
   // Fetch expense categories
@@ -417,6 +419,45 @@ export default function CreateBudgetDialog({
                   ) : (
                     <p className="text-sm text-gray-500 col-span-2">No categories available</p>
                   )}
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                  <Input
+                    placeholder="Add a custom category"
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={async () => {
+                      const name = newCategoryName.trim();
+                      if (!name) return;
+                      try {
+                        setIsCreatingCategory(true);
+                        const resp = await fetch('/api/user-expense-categories', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ name })
+                        });
+                        if (!resp.ok) {
+                          const err = await resp.json().catch(() => ({}));
+                          throw new Error(err.message || 'Failed to create category');
+                        }
+                        const created = await resp.json();
+                        setNewCategoryName('');
+                        await queryClient.invalidateQueries({ queryKey: ['/api/expense-categories'] });
+                        setSelectedCategories(prev => Array.from(new Set([...prev, created.id])));
+                        toast({ title: 'Category added', description: `Created "${created.name}"` });
+                      } catch (e: any) {
+                        toast({ title: 'Error', description: e.message || String(e), variant: 'destructive' });
+                      } finally {
+                        setIsCreatingCategory(false);
+                      }
+                    }}
+                    disabled={isCreatingCategory || !newCategoryName.trim()}
+                  >
+                    {isCreatingCategory ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
+                  </Button>
                 </div>
                 {categoryError && (
                   <p className="text-sm text-red-500 mt-1">{categoryError}</p>

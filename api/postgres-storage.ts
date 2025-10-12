@@ -261,8 +261,8 @@ export class PostgresStorage {
       return result.rows;
     }
   async getAllUsers(): Promise<User[]> {
-    const result = await pool.query('SELECT * FROM users');
-    return result.rows;
+  const result = await pool.query('SELECT * FROM users ORDER BY created_at DESC');
+  return result.rows;
   }
 
   async getUserRole(userId: number): Promise<string> {

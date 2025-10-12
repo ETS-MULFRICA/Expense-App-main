@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Dialog, DialogContent, DialogTitle, DialogActions } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -26,10 +26,10 @@ export const AddBudgetDialog: React.FC<AddBudgetDialogProps> = ({ isOpen, onClos
         <DialogTitle>Add Budget</DialogTitle>
         <Input value={name} onChange={e => setName(e.target.value)} placeholder="Budget Name" />
         <Input type="number" value={amount} onChange={e => setAmount(Number(e.target.value))} placeholder="Amount" />
-        <DialogActions>
+  <DialogFooter>
           <Button onClick={handleAdd}>Add</Button>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-        </DialogActions>
+  </DialogFooter>
       </DialogContent>
     </Dialog>
   );

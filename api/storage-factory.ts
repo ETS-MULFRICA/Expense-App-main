@@ -1,21 +1,11 @@
-import { MemStorage } from "./storage";
-import { IStorage } from "./storage";
-
-// Configuration for storage backend
-export const USE_SUPABASE = process.env.USE_SUPABASE === 'true';
+import session from "express-session";
+import { PostgresStorage } from "./postgres-storage";
 
 /**
  * Storage Factory
- * Creates the appropriate storage implementation based on configuration
+ * Returns a PostgresStorage instance backed by an in-memory SessionStore.
  */
-export async function createStorage(): Promise<IStorage> {
-  if (USE_SUPABASE) {
-    console.log('⚠️  Supabase storage not fully implemented yet');
-    console.log('🧠 Falling back to in-memory storage backend');
-  } else {
-    console.log('🧠 Using in-memory storage backend');
-  }
-  
-  console.log('⚠️  Data will not persist between server restarts');
-  return new MemStorage();
+export async function createStorage() {
+  const sessionStore = new session.MemoryStore();
+  return new PostgresStorage(sessionStore);
 }
