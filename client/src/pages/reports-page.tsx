@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Expense } from "@shared/schema";
+import { Expense, ExpenseCategory } from "@shared/schema";
+import { useQuery as useRQ } from "@tanstack/react-query";
 import Sidebar from "@/components/layout/sidebar";
 import MobileNav from "@/components/layout/mobile-nav";
 import ExpenseChart from "@/components/dashboard/expense-chart";
@@ -25,9 +26,22 @@ export default function ReportsPage() {
     return expenseDate >= sixMonthsAgo;
   }) || [];
 
-  // Calculate totals by category
+  // Fetch categories to map IDs -> names
+  const { data: categories } = useRQ<ExpenseCategory[]>({
+    queryKey: ['/api/expense-categories'],
+    enabled: true
+  });
+
+  const nameById = useMemo(() => {
+    const map = new Map<number, string>();
+    (categories || []).forEach(c => map.set((c as any).id, (c as any).name));
+    return map;
+  }, [categories]);
+
+  // Calculate totals by category name
   const categoryTotals = recentExpenses.reduce((acc, expense) => {
-    acc[expense.categoryId] = (acc[expense.categoryId] || 0) + expense.amount;
+    const name = nameById.get((expense as any).categoryId) || (expense as any).categoryName || 'Uncategorized';
+    acc[name] = (acc[name] || 0) + expense.amount;
     return acc;
   }, {} as Record<string, number>);
 

@@ -44,14 +44,16 @@ export default function ExpenseChart({ expenses }: ExpenseChartProps) {
     enabled: !!user
   });
   
-  // Enrich expenses with category names
+  // Enrich expenses with category names (prefer server-provided category_name, then map by categoryId)
   useEffect(() => {
     if (expenses && categories) {
       const newEnrichedExpenses = expenses.map(expense => {
+        // Prefer category_name coming from backend joins; else map by categoryId
+        const byServer = (expense as any).category_name as string | undefined;
         const category = categories.find(c => c.id === expense.categoryId);
         return {
           ...expense,
-          categoryName: category?.name || 'Uncategorized'
+          categoryName: (byServer && byServer.trim()) || category?.name || 'Uncategorized'
         };
       });
       setEnrichedExpenses(newEnrichedExpenses);

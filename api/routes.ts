@@ -2982,14 +2982,16 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requirePermission('
 app.get("/api/admin/expenses", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
     const r = await pool.query(`
-      SELECT e.*, u.name as user_name
+      SELECT e.*, u.name as user_name, ec.name AS category_name_join
       FROM expenses e
       LEFT JOIN users u ON u.id = e.user_id
+      LEFT JOIN expense_categories ec ON ec.id = e.category_id
       ORDER BY e.created_at DESC
     `);
     const expenses = r.rows.map((row: any) => ({
       ...row,
       userName: row.user_name,
+      categoryName: row.category_name || row.category_name_join || 'Uncategorized'
     }));
     
     // Log activity for admin viewing all expenses
@@ -3011,7 +3013,7 @@ app.get("/api/admin/expenses", requireAuth, requirePermission('admin.access'), a
       console.error('Failed to log admin view expenses activity:', logError);
     }
     
-    res.json(expenses);
+  res.json(expenses);
   } catch (error) {
     console.error("Error fetching all expenses:", error);
     res.status(500).json({ message: "Failed to fetch expenses" });
@@ -3021,14 +3023,16 @@ app.get("/api/admin/expenses", requireAuth, requirePermission('admin.access'), a
 app.get("/api/admin/incomes", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
     const r = await pool.query(`
-      SELECT i.*, u.name as user_name
+      SELECT i.*, u.name as user_name, ic.name AS category_name_join
       FROM incomes i
       LEFT JOIN users u ON u.id = i.user_id
+      LEFT JOIN income_categories ic ON ic.id = i.category_id
       ORDER BY i.created_at DESC
     `);
     const incomes = r.rows.map((row: any) => ({
       ...row,
       userName: row.user_name,
+      categoryName: row.category_name || row.category_name_join || 'Uncategorized'
     }));
     
     // Log activity for admin viewing all incomes
@@ -3050,7 +3054,7 @@ app.get("/api/admin/incomes", requireAuth, requirePermission('admin.access'), as
       console.error('Failed to log admin view incomes activity:', logError);
     }
     
-    res.json(incomes);
+  res.json(incomes);
   } catch (error) {
     console.error("Error fetching all incomes:", error);
     res.status(500).json({ message: "Failed to fetch incomes" });

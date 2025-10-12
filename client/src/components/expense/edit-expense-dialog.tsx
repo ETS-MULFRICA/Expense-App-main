@@ -1,4 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,23 +37,13 @@ export default function EditExpenseDialog({
   const { user } = useAuth();
   const currencySymbol = user?.currency ? currencySymbols[user.currency] : 'FCFA';
   
-  // Static categories as per add expense dialog
-  const staticCategories = [
-    { id: 1, name: 'Children' },
-    { id: 2, name: 'Debt' },
-    { id: 3, name: 'Education' },
-    { id: 4, name: 'Entertainment' },
-    { id: 5, name: 'Everyday' },
-    { id: 6, name: 'Gifts' },
-    { id: 7, name: 'Health/medical' },
-    { id: 8, name: 'Home' },
-    { id: 9, name: 'Insurance' },
-    { id: 10, name: 'Pets' },
-    { id: 11, name: 'Technology' },
-    { id: 12, name: 'Transportation' },
-    { id: 13, name: 'Travel' },
-    { id: 14, name: 'Utilities' },
-  ];
+  // Fetch user + system categories; allow adding private category
+  const { data: categories } = useQuery<ExpenseCategory[]>({
+    queryKey: ['/api/expense-categories'],
+    enabled: !!user && isOpen
+  });
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [creatingCategory, setCreatingCategory] = useState(false);
 
   const form = useForm<InsertExpense>({
     resolver: zodResolver(clientExpenseSchema),
@@ -60,7 +51,7 @@ export default function EditExpenseDialog({
       description: expense.description,
       amount: expense.amount,
       date: new Date(expense.date),
-      categoryId: expense.categoryId || 0,
+  categoryId: expense.categoryId || 0,
       subcategoryId: expense.subcategoryId || null,
       merchant: expense.merchant || "",
       notes: expense.notes || ""
@@ -192,7 +183,7 @@ export default function EditExpenseDialog({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {staticCategories.map((category) => (
+                      {(categories || []).map((category) => (
                         <SelectItem key={category.id} value={category.id.toString()}>
                           {category.name}
                         </SelectItem>
@@ -203,6 +194,47 @@ export default function EditExpenseDialog({
                 </FormItem>
               )}
             />
+
+            {/* Quick add private category */}
+            <div className="flex items-center gap-2 -mt-2">
+              <Input
+                placeholder="Add a private category"
+                value={newCategoryName}
+                onChange={(e) => setNewCategoryName(e.target.value)}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={creatingCategory || !newCategoryName.trim()}
+                onClick={async () => {
+                  const name = newCategoryName.trim();
+                  if (!name) return;
+                  try {
+                    setCreatingCategory(true);
+                    const resp = await fetch('/api/user-expense-categories', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ name })
+                    });
+                    if (!resp.ok) {
+                      const err = await resp.json().catch(() => ({}));
+                      throw new Error(err.message || 'Failed to create category');
+                    }
+                    const created = await resp.json();
+                    setNewCategoryName('');
+                    await queryClient.invalidateQueries({ queryKey: ['/api/expense-categories'] });
+                    form.setValue('categoryId', created.id);
+                    toast({ title: 'Category added', description: `Created "${created.name}"` });
+                  } catch (e: any) {
+                    toast({ title: 'Error', description: e.message || String(e), variant: 'destructive' });
+                  } finally {
+                    setCreatingCategory(false);
+                  }
+                }}
+              >
+                {creatingCategory ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
+              </Button>
+            </div>
             
             <FormField
               control={form.control}

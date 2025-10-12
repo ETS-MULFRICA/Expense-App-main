@@ -6,6 +6,7 @@ import ExpenseChart from "@/components/dashboard/expense-chart";
 import RecentExpenses from "@/components/dashboard/recent-expenses";
 import AddExpenseDialog from "@/components/expense/add-expense-dialog";
 import { useAuth } from "@/hooks/use-auth";
+import { useQuery as useRQ } from "@tanstack/react-query";
 import MainLayout from "@/components/layout/main-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -20,6 +21,13 @@ export default function HomePage() {
   const { data: announcements } = useQuery<any[]>({
     queryKey: ["/api/announcements"],
   });
+
+  // Determine if current user is admin to decide showing announcements card
+  const { data: capabilities } = useRQ<{ permissions: string[] }>({
+    queryKey: ["/api/capabilities"],
+    enabled: !!user,
+  });
+  const isAdmin = !!capabilities?.permissions?.includes('admin.access') || user?.role === 'admin';
 
   useEffect(() => {
     // If user navigated via sidebar Announcements link (hash), scroll to it
@@ -119,7 +127,7 @@ export default function HomePage() {
         recentEntriesCount={recentExpensesCount}
       />
 
-      {announcements && announcements.length > 0 && (
+  {isAdmin && announcements && announcements.length > 0 && (
         <Card className="mt-6" id="announcements-card">
           <CardHeader>
             <CardTitle>Announcements</CardTitle>

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { clientBudgetSchema } from "@shared/schema";
@@ -43,6 +43,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { ExpenseCategory } from "@shared/schema";
 
 const formSchema = clientBudgetSchema;
 
@@ -61,6 +62,24 @@ export default function EditBudgetDialog({
 }: EditBudgetDialogProps) {
   const [isPeriodCustom, setIsPeriodCustom] = useState(false);
   const { toast } = useToast();
+  const [selectedCategories, setSelectedCategories] = useState<number[]>([]);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [creatingCategory, setCreatingCategory] = useState(false);
+
+  // Load categories and current allocations for this budget
+  const { data: categories } = useQuery<ExpenseCategory[]>({
+    queryKey: ["/api/expense-categories"],
+    enabled: isOpen,
+  });
+  const { data: allocations } = useQuery<{ id:number; categoryId:number; amount:number; budgetId:number }[]>({
+    queryKey: ["/api/budgets", budget.id, "allocations"],
+    queryFn: async () => {
+      const r = await fetch(`/api/budgets/${budget.id}/allocations`);
+      if (!r.ok) throw new Error('Failed to load allocations');
+      return r.json();
+    },
+    enabled: isOpen,
+  });
 
   // Safely parse dates with fallback
   const parseDate = (dateValue: any) => {
@@ -94,7 +113,15 @@ export default function EditBudgetDialog({
 
     // Check if the period is custom
     setIsPeriodCustom(budget.period === "custom");
+    // Preselect categories from current allocations
+    // allocations may not be loaded yet; also update when allocations load
   }, [budget, form]);
+
+  useEffect(() => {
+    if (allocations) {
+      setSelectedCategories(Array.from(new Set(allocations.map(a => a.categoryId))));
+    }
+  }, [allocations]);
 
   const updateBudgetMutation = useMutation({
     mutationFn: async (data: FormValues) => {
@@ -113,8 +140,30 @@ export default function EditBudgetDialog({
 
       return response.json() as Promise<Budget>;
     },
-    onSuccess: () => {
+    onSuccess: async () => {
+      // Sync allocations to reflect selectedCategories
+      try {
+        // Fetch latest allocations
+        const r = await fetch(`/api/budgets/${budget.id}/allocations`);
+        const current = r.ok ? await r.json() : [];
+        const currentCatIds: number[] = Array.from(new Set((current||[]).map((a:any)=>a.categoryId)));
+        const toAdd = selectedCategories.filter(id => !currentCatIds.includes(id));
+        const toRemove = current.filter((a:any) => !selectedCategories.includes(a.categoryId));
+        // Add new allocations (amount 0 by default)
+        for (const catId of toAdd) {
+          await fetch(`/api/budgets/${budget.id}/allocations`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ budgetId: budget.id, categoryId: catId, subcategoryId: null, amount: 0 })
+          }).catch(()=>{});
+        }
+        // Remove de-selected allocations
+        for (const alloc of toRemove) {
+          await fetch(`/api/budget-allocations/${alloc.id}`, { method: 'DELETE' }).catch(()=>{});
+        }
+      } catch {}
       queryClient.invalidateQueries({ queryKey: ["/api/budgets"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/budgets", budget.id, "allocations"] });
       toast({
         title: "Budget updated",
         description: "Your budget has been updated successfully.",
@@ -371,6 +420,72 @@ export default function EditBudgetDialog({
                 )}
               />
             </div>
+
+              {/* Categories selection */}
+              <FormItem>
+                <FormLabel>Categories</FormLabel>
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  {(categories || []).map((category) => (
+                    <div key={category.id} className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id={`category-${category.id}`}
+                        checked={selectedCategories.includes(category.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedCategories(prev => Array.from(new Set([...prev, category.id])));
+                          } else {
+                            setSelectedCategories(prev => prev.filter(id => id !== category.id));
+                          }
+                        }}
+                        className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                      />
+                      <label htmlFor={`category-${category.id}`} className="text-sm font-medium leading-none">
+                        {category.name}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                  <Input
+                    placeholder="Add a custom category"
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={creatingCategory || !newCategoryName.trim()}
+                    onClick={async () => {
+                      const name = newCategoryName.trim();
+                      if (!name) return;
+                      try {
+                        setCreatingCategory(true);
+                        const resp = await fetch('/api/user-expense-categories', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ name })
+                        });
+                        if (!resp.ok) {
+                          const err = await resp.json().catch(() => ({}));
+                          throw new Error(err.message || 'Failed to create category');
+                        }
+                        const created = await resp.json();
+                        setNewCategoryName('');
+                        await queryClient.invalidateQueries({ queryKey: ['/api/expense-categories'] });
+                        setSelectedCategories(prev => Array.from(new Set([...prev, created.id])));
+                        toast({ title: 'Category added', description: `Created "${created.name}"` });
+                      } catch (e:any) {
+                        toast({ title: 'Error', description: e.message || String(e), variant: 'destructive' });
+                      } finally {
+                        setCreatingCategory(false);
+                      }
+                    }}
+                  >
+                    {creatingCategory ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
+                  </Button>
+                </div>
+              </FormItem>
 
             <FormField
               control={form.control}
