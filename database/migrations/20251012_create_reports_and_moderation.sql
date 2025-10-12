@@ -1,5 +1,5 @@
 -- Moderation & Reports schema additions
-BEGIN;
+-- Compatibility: avoid BEGIN/COMMIT wrappers (runner handles transaction)
 
 -- Add hidden flags to expenses and incomes
 ALTER TABLE IF EXISTS expenses ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE;
@@ -24,23 +24,28 @@ CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_type, target_id)
 CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at);
 
 -- Seed moderation.manage permission and attach to admin
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'permissions') THEN
-    INSERT INTO permissions(name, description)
-    VALUES ('moderation.manage', 'Manage reports and hidden content')
-    ON CONFLICT (name) DO NOTHING;
+-- Seed moderation.manage permission in a schema-aware way
+-- Handle schemas with optional resource/action columns
+INSERT INTO permissions (name, description, resource, action)
+SELECT 'moderation.manage', 'Manage reports and hidden content', 'moderation', 'manage'
+WHERE EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='permissions' AND column_name='resource')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='permissions' AND column_name='action')
+ON CONFLICT (name) DO NOTHING;
 
-    -- Link to admin role if role_permissions table exists
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'roles') AND 
-       EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'role_permissions') THEN
-      INSERT INTO role_permissions(role_id, permission_id)
-      SELECT r.id, p.id
-      FROM roles r, permissions p
-      WHERE r.name = 'admin' AND p.name = 'moderation.manage'
-      ON CONFLICT DO NOTHING;
-    END IF;
-  END IF;
-END $$;
+INSERT INTO permissions (name, description, resource)
+SELECT 'moderation.manage', 'Manage reports and hidden content', 'moderation'
+WHERE EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='permissions' AND column_name='resource')
+  AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='permissions' AND column_name='action')
+ON CONFLICT (name) DO NOTHING;
 
-COMMIT;
+INSERT INTO permissions (name, description)
+SELECT 'moderation.manage', 'Manage reports and hidden content'
+WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='permissions' AND column_name='resource')
+ON CONFLICT (name) DO NOTHING;
+
+-- Link to admin role if possible
+INSERT INTO role_permissions(role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r, permissions p
+WHERE r.name = 'admin' AND p.name = 'moderation.manage'
+ON CONFLICT DO NOTHING;

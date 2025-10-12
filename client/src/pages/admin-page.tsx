@@ -987,7 +987,12 @@ export default function AdminPage() {
 
           {/* SYSTEM SETTINGS TAB */}
           <TabsContent value="system-settings">
-            <AdminSettingsPage embedded />
+            <div className="space-y-6">
+              <AdminSettingsPage embedded />
+              <BackupPanel />
+              <ActivityLogPanel />
+              <LoginAttemptsPanel />
+            </div>
           </TabsContent>
 
           {/* ANNOUNCEMENTS TAB */}
@@ -1241,6 +1246,7 @@ function AnnouncementsManager() {
   };
 
   return (
+  <>
     <Card>
       <CardHeader>
         <CardTitle>Announcements</CardTitle>
@@ -1274,16 +1280,26 @@ function AnnouncementsManager() {
           </div>
         </div>
       </CardContent>
-    </Card>
+  </Card>
+  </>
   );
 }
 
 function ModerationManager({ loadingId, setLoadingId }: { loadingId: number | null; setLoadingId: (id: number | null) => void; }) {
   const { toast } = useToast();
+  const [statusFilter, setStatusFilter] = useState<string>('open,escalated');
+  const [typeFilter, setTypeFilter] = useState<string>('');
+  const [page, setPage] = useState(0);
+  const pageSize = 25;
   const { data, refetch, isLoading } = useQuery({
-    queryKey: ['/api/admin/reports'],
+    queryKey: ['/api/admin/reports', statusFilter, typeFilter, page],
     queryFn: async () => {
-      const r = await fetch('/api/admin/reports');
+      const params = new URLSearchParams();
+      if (statusFilter) params.set('status', statusFilter);
+      if (typeFilter) params.set('targetType', typeFilter);
+      params.set('limit', String(pageSize));
+      params.set('offset', String(page * pageSize));
+      const r = await fetch(`/api/admin/reports?${params.toString()}`);
       if (!r.ok) throw new Error('Failed to load reports');
       return r.json();
     }
@@ -1304,6 +1320,33 @@ function ModerationManager({ loadingId, setLoadingId }: { loadingId: number | nu
   };
 
   return (
+    <>
+    <div className="flex items-center gap-2 mb-3">
+      <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(0); }}>
+        <SelectTrigger className="w-56"><SelectValue placeholder="Status" /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="open,escalated">Open + Escalated</SelectItem>
+          <SelectItem value="open">Open only</SelectItem>
+          <SelectItem value="escalated">Escalated only</SelectItem>
+          <SelectItem value="resolved">Resolved</SelectItem>
+          <SelectItem value="dismissed">Dismissed</SelectItem>
+        </SelectContent>
+      </Select>
+      <Select value={typeFilter} onValueChange={(v) => { setTypeFilter(v === 'all' ? '' : v); setPage(0); }}>
+        <SelectTrigger className="w-40"><SelectValue placeholder="Type" /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All types</SelectItem>
+          <SelectItem value="expense">Expense</SelectItem>
+          <SelectItem value="income">Income</SelectItem>
+          <SelectItem value="budget">Budget</SelectItem>
+        </SelectContent>
+      </Select>
+      <div className="ml-auto flex items-center gap-2">
+        <Button variant="outline" size="sm" disabled={page===0} onClick={() => setPage(p => Math.max(0, p-1))}>Prev</Button>
+        <div className="text-xs text-gray-600">Page {page+1}</div>
+        <Button variant="outline" size="sm" onClick={() => setPage(p => p+1)}>Next</Button>
+      </div>
+    </div>
     <Card>
       <CardHeader>
         <CardTitle>Moderation Queue</CardTitle>
@@ -1343,12 +1386,243 @@ function ModerationManager({ loadingId, setLoadingId }: { loadingId: number | nu
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center text-gray-500">No open reports</TableCell>
+                  <TableCell colSpan={6} className="text-center text-gray-500">No reports</TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         )}
+      </CardContent>
+    </Card>
+    </>
+  );
+}
+
+function BackupPanel() {
+  const { toast } = useToast();
+  const { data: backups, refetch, isFetching } = useQuery({
+    queryKey: ['/api/admin/backups'],
+    queryFn: async () => {
+      const r = await fetch('/api/admin/backups');
+      if (!r.ok) throw new Error('Failed to list backups');
+      return r.json();
+    }
+  });
+  const [restoreTarget, setRestoreTarget] = useState<null | { file: string }>(null);
+  const trigger = async () => {
+    const r = await fetch('/api/admin/backup', { method: 'POST' });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      toast({ title: 'Backup failed', description: e?.message || 'pg_dump not available?', variant: 'destructive' });
+      return;
+    }
+    const data = await r.json();
+    toast({ title: 'Backup started', description: data.file || 'Backup complete' });
+    refetch();
+  };
+  const fmtSize = (n: number) => {
+    if (!Number.isFinite(n)) return '-';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let u = 0;
+    let v = n;
+    while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+    return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[u]}`;
+  };
+  const restore = async (file: string) => {
+    const r = await fetch('/api/admin/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file, confirm: true }) });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      toast({ title: 'Restore failed', description: e?.message || 'psql not available or permission denied', variant: 'destructive' });
+      return;
+    }
+    toast({ title: 'Restore complete', description: `Database restored from ${file}` });
+    setRestoreTarget(null);
+  };
+  return (
+    <>
+    <Card>
+      <CardHeader>
+        <CardTitle>Database Backup</CardTitle>
+        <CardDescription>Create and download SQL backups</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center gap-2 mb-4">
+          <Button onClick={trigger} disabled={isFetching}><RefreshCw className="h-4 w-4 mr-2" />Trigger Backup</Button>
+          <Button variant="outline" onClick={() => refetch()}>Refresh List</Button>
+        </div>
+        <div className="text-sm text-gray-600 mb-2">Latest backups</div>
+        <ul className="space-y-2">
+          {Array.isArray(backups) && backups.length ? backups.map((b: any) => (
+            <li key={b.file} className="flex flex-col md:flex-row md:justify-between md:items-center border rounded p-2 gap-2">
+              <div className="min-w-0">
+                <div className="font-mono text-xs break-all">{b.file}</div>
+                <div className="text-xs text-gray-500">{b.createdAt ? new Date(b.createdAt).toLocaleString() : ''} · {fmtSize(b.size)}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <a className="underline text-sm" href={`/api/admin/backups/${encodeURIComponent(b.file)}`}>Download</a>
+                <Button variant="destructive" size="sm" onClick={() => setRestoreTarget({ file: b.file })}>Restore</Button>
+              </div>
+            </li>
+          )) : <li className="text-sm text-gray-500">No backups yet.</li>}
+        </ul>
+        <div className="text-xs text-gray-500 mt-3">If trigger fails, ensure pg_dump is installed and DB env vars are set. You can also run a manual dump using documented scripts.</div>
+      </CardContent>
+  </Card>
+    
+  {/* Restore confirm dialog */}
+    <AlertDialog open={!!restoreTarget} onOpenChange={(o) => !o && setRestoreTarget(null)}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Restore database?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This will run the selected SQL dump against your database and may overwrite data. This action cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={() => restoreTarget && restore(restoreTarget.file)}>Yes, restore</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+  </AlertDialog>
+  </>
+  );
+}
+
+function LoginAttemptsPanel() {
+  const { toast } = useToast();
+  const { data, isLoading } = useQuery({
+    queryKey: ['/api/admin/login-attempts?limit=50'],
+    queryFn: async () => {
+      const r = await fetch('/api/admin/login-attempts?limit=50');
+      if (!r.ok) throw new Error('Failed to load login attempts');
+      return r.json();
+    }
+  });
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Login Attempts</CardTitle>
+        <CardDescription>Recent successful and failed logins</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin" /></div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Time</TableHead>
+                <TableHead>Username</TableHead>
+                <TableHead>Result</TableHead>
+                <TableHead>IP</TableHead>
+                <TableHead>User-Agent</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data?.map((r: any) => (
+                <TableRow key={r.id}>
+                  <TableCell>{new Date(r.created_at).toLocaleString()}</TableCell>
+                  <TableCell>{r.username}</TableCell>
+                  <TableCell>
+                    <span className={`px-2 py-0.5 rounded text-xs ${r.success ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>{r.success ? 'Success' : 'Failed'}</span>
+                  </TableCell>
+                  <TableCell>{r.ip_address || '-'}</TableCell>
+                  <TableCell className="max-w-md truncate" title={r.user_agent || ''}>{r.user_agent || '-'}</TableCell>
+                </TableRow>
+              )) || (
+                <TableRow><TableCell colSpan={5} className="text-center text-gray-500">No attempts yet</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ActivityLogPanel() {
+  const [userId, setUserId] = useState('');
+  const [actionType, setActionType] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [page, setPage] = useState(0);
+  const limit = 50;
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['/api/admin/activity-log', userId, actionType, from, to, page],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (userId) params.set('userId', userId);
+      if (actionType) params.set('actionType', actionType);
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      params.set('limit', String(limit));
+      params.set('offset', String(page * limit));
+      const r = await fetch(`/api/admin/activity-log?${params.toString()}`);
+      if (!r.ok) throw new Error('Failed to load activity log');
+      return r.json();
+    }
+  });
+  const exportCsv = () => {
+    const params = new URLSearchParams();
+    if (userId) params.set('userId', userId);
+    if (actionType) params.set('actionType', actionType);
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    window.location.href = `/api/admin/activity-log/export?${params.toString()}`;
+  };
+  return (
+    <Card className="mt-6">
+      <CardHeader>
+        <CardTitle>Activity Log</CardTitle>
+        <CardDescription>Uneditable audit log for admin actions (retained 90 days)</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-col md:flex-row gap-2 mb-3">
+          <Input placeholder="User ID" value={userId} onChange={e=>{ setUserId(e.target.value); setPage(0); }} className="w-32" />
+          <Input placeholder="Action type (e.g., VIEW, CREATE, UPDATE, DELETE, LOGIN)" value={actionType} onChange={e=>{ setActionType(e.target.value); setPage(0); }} className="flex-1" />
+          <Input type="datetime-local" value={from} onChange={e=>{ setFrom(e.target.value); setPage(0); }} />
+          <Input type="datetime-local" value={to} onChange={e=>{ setTo(e.target.value); setPage(0); }} />
+          <div className="ml-auto flex gap-2">
+            <Button variant="outline" onClick={()=>{ setUserId(''); setActionType(''); setFrom(''); setTo(''); setPage(0); refetch(); }}>Clear</Button>
+            <Button onClick={exportCsv}>Export CSV</Button>
+          </div>
+        </div>
+        {isLoading ? (
+          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin" /></div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Time</TableHead>
+                <TableHead>User</TableHead>
+                <TableHead>Action</TableHead>
+                <TableHead>Resource</TableHead>
+                <TableHead>IP</TableHead>
+                <TableHead>Description</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data?.length ? data.map((r: any) => (
+                <TableRow key={r.id}>
+                  <TableCell>{new Date(r.created_at).toLocaleString()}</TableCell>
+                  <TableCell>#{r.user_id} {r.user_name ? `• ${r.user_name}` : ''}</TableCell>
+                  <TableCell>{r.action_type}</TableCell>
+                  <TableCell>{r.resource_type}{r.resource_id ? ` #${r.resource_id}` : ''}</TableCell>
+                  <TableCell>{r.ip_address || '-'}</TableCell>
+                  <TableCell className="max-w-lg truncate" title={r.description}>{r.description}</TableCell>
+                </TableRow>
+              )) : (
+                <TableRow><TableCell colSpan={6} className="text-center text-gray-500">No activity</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        )}
+        <div className="mt-3 flex items-center gap-2 justify-end">
+          <Button variant="outline" size="sm" disabled={page===0} onClick={()=>setPage(p=>Math.max(0,p-1))}>Prev</Button>
+          <div className="text-xs text-gray-600">Page {page+1}</div>
+          <Button variant="outline" size="sm" onClick={()=>setPage(p=>p+1)}>Next</Button>
+        </div>
+        <div className="text-xs text-gray-500 mt-3">Security: Admin-only. Logs are immutable (no edit/delete). Use env vars for credentials. Sensitive data and backups should be encrypted at rest.</div>
       </CardContent>
     </Card>
   );

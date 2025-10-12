@@ -3,6 +3,9 @@ import type { Express, Request, Response } from "express";
 import cors from "cors";
 import { corsOptions } from "./cors-config";
 import { createServer, type Server } from "http";
+import fs from 'fs';
+import path from 'path';
+import { spawn } from 'child_process';
 // Import database storage layer
 import { storage } from "./storage";
 import { pool } from "./db";
@@ -235,6 +238,210 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (e) {
       console.error('Capabilities fetch failed', e);
       res.status(500).json({ message: 'Failed to fetch capabilities' });
+    }
+  });
+
+  // --- Backups (Admin) ---
+  app.post('/api/admin/backup', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const backupsDir = path.resolve(__dirname, '../backups');
+      if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const file = path.join(backupsDir, `backup-${ts}.sql`);
+      // Use pg_dump; require PG env vars to be set
+      const args = [
+        `--host=${process.env.DB_HOST || 'localhost'}`,
+        `--port=${process.env.DB_PORT || '5432'}`,
+        `--username=${process.env.DB_USER || ''}`,
+        `--no-owner`,
+        `${process.env.DB_NAME || ''}`
+      ];
+      const env = { ...process.env };
+      // If password set, use PGPASSWORD for pg_dump
+      if (process.env.DB_PASSWORD) env.PGPASSWORD = process.env.DB_PASSWORD;
+      const proc = spawn('pg_dump', args, { env });
+      const w = fs.createWriteStream(file);
+      proc.stdout.pipe(w);
+      let stderr = '';
+      proc.stderr.on('data', d => stderr += d.toString());
+      proc.on('close', async (code) => {
+        if (code === 0) {
+          try { await logActivity({ userId: req.user!.id, actionType: 'VIEW', resourceType: 'REPORT', description: `Admin triggered backup ${path.basename(file)}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+          return res.json({ ok: true, file: path.basename(file) });
+        } else {
+          console.error('pg_dump failed', stderr);
+          return res.status(500).json({ ok: false, message: 'Backup failed', error: stderr.trim() });
+        }
+      });
+    } catch (e) {
+      console.error('Backup error', e);
+      res.status(500).json({ message: 'Backup failed' });
+    }
+  });
+
+  app.get('/api/admin/backups', requireAuth, requirePermission('admin.access'), async (_req, res) => {
+    try {
+      const backupsDir = path.resolve(__dirname, '../backups');
+      if (!fs.existsSync(backupsDir)) return res.json([]);
+      const files = fs.readdirSync(backupsDir)
+        .filter(f => f.endsWith('.sql'))
+        .map(f => {
+          const full = path.join(backupsDir, f);
+          const stat = fs.statSync(full);
+          return { file: f, size: stat.size, createdAt: stat.mtime.toISOString() };
+        })
+        .sort((a, b) => a.file < b.file ? 1 : -1);
+      res.json(files);
+    } catch (e) {
+      res.status(500).json({ message: 'Failed to list backups' });
+    }
+  });
+
+  app.get('/api/admin/backups/:file', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const backupsDir = path.resolve(__dirname, '../backups');
+      const filePath = path.join(backupsDir, path.basename(req.params.file));
+      if (!fs.existsSync(filePath)) return res.status(404).json({ message: 'Not found' });
+      res.setHeader('Content-Type', 'application/sql');
+      res.setHeader('Content-Disposition', `attachment; filename=${path.basename(filePath)}`);
+      fs.createReadStream(filePath).pipe(res);
+    } catch (e) {
+      res.status(500).json({ message: 'Failed to download backup' });
+    }
+  });
+
+  // Restore from a backup file (DANGEROUS). Requires confirm=true in body.
+  app.post('/api/admin/restore', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const { file, confirm } = req.body || {};
+      if (!confirm) return res.status(400).json({ message: 'Confirmation required' });
+      if (!file || typeof file !== 'string') return res.status(400).json({ message: 'file is required' });
+      const backupsDir = path.resolve(__dirname, '../backups');
+      const filePath = path.join(backupsDir, path.basename(file));
+      if (!fs.existsSync(filePath)) return res.status(404).json({ message: 'Backup not found' });
+      // Safety: in production, require explicit ENABLE_RESTORE=yes
+      if (process.env.NODE_ENV === 'production' && process.env.ENABLE_RESTORE !== 'yes') {
+        return res.status(403).json({ message: 'Restore disabled in production (set ENABLE_RESTORE=yes to allow)' });
+      }
+      const args = [
+        `--host=${process.env.DB_HOST || 'localhost'}`,
+        `--port=${process.env.DB_PORT || '5432'}`,
+        `--username=${process.env.DB_USER || ''}`,
+        `${process.env.DB_NAME || ''}`
+      ];
+      const env = { ...process.env };
+      if (process.env.DB_PASSWORD) env.PGPASSWORD = process.env.DB_PASSWORD;
+      const proc = spawn('psql', args, { env });
+      const r = fs.createReadStream(filePath);
+      r.pipe(proc.stdin);
+      let stderr = '';
+      let stdout = '';
+      proc.stderr.on('data', d => stderr += d.toString());
+      proc.stdout.on('data', d => stdout += d.toString());
+      proc.on('close', async (code) => {
+        if (code === 0) {
+          try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'REPORT', description: `Admin restored DB from ${path.basename(filePath)}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+          return res.json({ ok: true, message: 'Restore completed' });
+        }
+        console.error('psql restore failed', stderr);
+        res.status(500).json({ ok: false, message: 'Restore failed', error: stderr.trim() });
+      });
+    } catch (e) {
+      console.error('Restore error', e);
+      res.status(500).json({ message: 'Restore failed' });
+    }
+  });
+
+  // Login attempts list (Admin)
+  app.get('/api/admin/login-attempts', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+    const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+      let limit = parseInt(rawLimit ?? '50');
+    let offset = parseInt(rawOffset ?? '0');
+      if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+      if (limit > 500) limit = 500;
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
+    const r = await pool.query('SELECT * FROM login_attempts ORDER BY created_at DESC LIMIT $1 OFFSET $2', [limit, offset]);
+      res.json(r.rows);
+    } catch (e) {
+      res.status(500).json({ message: 'Failed to load login attempts' });
+    }
+  });
+
+  // Activity Log: list with filters (admin only)
+  app.get('/api/admin/activity-log', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const qs = req.query as any;
+      const params: any[] = [];
+      const where: string[] = [];
+      if (qs.userId) { params.push(parseInt(String(qs.userId))); where.push(`al.user_id = $${params.length}`); }
+      if (qs.actionType) { params.push(String(qs.actionType)); where.push(`al.action_type = $${params.length}`); }
+      if (qs.from) { params.push(new Date(String(qs.from))); where.push(`al.created_at >= $${params.length}`); }
+      if (qs.to) { params.push(new Date(String(qs.to))); where.push(`al.created_at <= $${params.length}`); }
+      let limit = parseInt(qs.limit ?? '100');
+      let offset = parseInt(qs.offset ?? '0');
+      if (!Number.isFinite(limit) || limit <= 0) limit = 100; if (limit > 1000) limit = 1000;
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      params.push(limit); params.push(offset);
+      const q = await pool.query(
+        `SELECT al.*, u.name AS user_name
+         FROM activity_log al
+         LEFT JOIN users u ON u.id = al.user_id
+         ${whereSql}
+         ORDER BY al.created_at DESC
+         LIMIT $${params.length-1} OFFSET $${params.length}`,
+        params
+      );
+      res.json(q.rows);
+    } catch (e) {
+      console.error('Activity log list failed', e);
+      res.status(500).json({ message: 'Failed to load activity log' });
+    }
+  });
+
+  // Activity Log: export CSV (admin only)
+  app.get('/api/admin/activity-log/export', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const qs = req.query as any;
+      const params: any[] = [];
+      const where: string[] = [];
+      if (qs.userId) { params.push(parseInt(String(qs.userId))); where.push(`al.user_id = $${params.length}`); }
+      if (qs.actionType) { params.push(String(qs.actionType)); where.push(`al.action_type = $${params.length}`); }
+      if (qs.from) { params.push(new Date(String(qs.from))); where.push(`al.created_at >= $${params.length}`); }
+      if (qs.to) { params.push(new Date(String(qs.to))); where.push(`al.created_at <= $${params.length}`); }
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const q = await pool.query(
+        `SELECT al.*, u.name AS user_name
+         FROM activity_log al
+         LEFT JOIN users u ON u.id = al.user_id
+         ${whereSql}
+         ORDER BY al.created_at DESC`,
+        params
+      );
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename=activity-log-${Date.now()}.csv`);
+      // CSV header
+      res.write('timestamp,user_id,user_name,action_type,resource_type,resource_id,ip_address,user_agent,description\n');
+      for (const r of q.rows) {
+        const line = [
+          new Date(r.created_at).toISOString(),
+          r.user_id,
+          (r.user_name||'').replace(/,/g,' '),
+          r.action_type,
+          r.resource_type,
+          r.resource_id ?? '',
+          r.ip_address ?? '',
+          (r.user_agent||'').replace(/,/g,' '),
+          (r.description||'').replace(/\n/g,' ').replace(/,/g,' ')
+        ].join(',');
+        res.write(line + '\n');
+      }
+      res.end();
+    } catch (e) {
+      console.error('Activity log export failed', e);
+      res.status(500).json({ message: 'Failed to export activity log' });
     }
   });
   // --- Roles & Permissions admin API ---
@@ -1122,14 +1329,44 @@ app.post('/api/reports', requireAuth, async (req, res) => {
 });
 
 // Admin: list open reports
-app.get('/api/admin/reports', requireAuth, requirePermission('moderation.manage'), async (_req, res) => {
+app.get('/api/admin/reports', requireAuth, requirePermission('moderation.manage'), async (req, res) => {
   try {
+    const qs = req.query as any;
+    const allowedStatuses = ['open','escalated','resolved','dismissed'];
+    let statuses: string[];
+    if (qs.status) {
+      statuses = String(qs.status).split(',').map((s: string) => s.trim()).filter((s: string) => allowedStatuses.includes(s));
+    } else {
+      statuses = ['open','escalated'];
+    }
+    if (statuses.length === 0) statuses = ['open','escalated'];
+    const targetType = qs.targetType && ['expense','income','budget'].includes(String(qs.targetType)) ? String(qs.targetType) : null;
+    let limit = parseInt(qs.limit ?? '50');
+    let offset = parseInt(qs.offset ?? '0');
+    if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+    if (limit > 200) limit = 200;
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+    const params: any[] = [];
+    const whereParts: string[] = [];
+    // statuses as ANY($1)
+    params.push(statuses);
+    whereParts.push(`rep.status = ANY($${params.length})`);
+    if (targetType) {
+      params.push(targetType);
+      whereParts.push(`rep.target_type = $${params.length}`);
+    }
+    const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+    params.push(limit);
+    params.push(offset);
     const r = await pool.query(
       `SELECT rep.*, u.name AS reporter_name
        FROM reports rep
        LEFT JOIN users u ON u.id = rep.reporter_user_id
-       WHERE rep.status IN ('open','escalated')
-       ORDER BY rep.created_at DESC`
+       ${whereSql}
+       ORDER BY rep.created_at DESC
+       LIMIT $${params.length-1} OFFSET $${params.length}`,
+      params
     );
     res.json(r.rows);
   } catch (e) {

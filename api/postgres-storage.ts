@@ -492,7 +492,17 @@ export class PostgresStorage {
 
   // Income operations
   async getIncomesByUserId(userId: number): Promise<Income[]> {
-  const result = await pool.query('SELECT * FROM incomes WHERE user_id = $1 AND COALESCE(is_hidden, FALSE) = FALSE', [userId]);
+    // Check if is_hidden column exists to keep compatibility with older DBs
+    const colCheck = await pool.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name = 'incomes' AND column_name = 'is_hidden'`
+    );
+    let result;
+    if (colCheck.rowCount && colCheck.rowCount > 0) {
+      result = await pool.query('SELECT * FROM incomes WHERE user_id = $1 AND COALESCE(is_hidden, FALSE) = FALSE', [userId]);
+    } else {
+      // Fallback when column doesn't exist yet
+      result = await pool.query('SELECT * FROM incomes WHERE user_id = $1', [userId]);
+    }
     // Map all fields to camelCase for TS compatibility
     return result.rows.map(row => ({
       id: row.id,
@@ -505,7 +515,7 @@ export class PostgresStorage {
       subcategoryId: row.subcategory_id,
       source: row.source,
       notes: row.notes,
-  isHidden: row.is_hidden,
+      isHidden: (row as any).is_hidden,
       createdAt: row.created_at
     }));
   }
@@ -526,7 +536,7 @@ export class PostgresStorage {
       subcategoryId: row.subcategory_id,
       source: row.source,
       notes: row.notes,
-  isHidden: row.is_hidden,
+      isHidden: (row as any).is_hidden,
       createdAt: row.created_at
     };
   }

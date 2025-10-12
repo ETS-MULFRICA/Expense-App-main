@@ -64,15 +64,14 @@ export function setupAuth(app: Express) {
         const result = await client.query('SELECT * FROM users WHERE username = $1', [username]);
         const user = result.rows[0];
         console.log("Authenticating user:",{ user, username });
-        if (!user) return done(null, false);
+        if (!user) {
+          try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, NULL, FALSE, NULL, NULL)', [username]); } catch {}
+          return done(null, false);
+        }
         // Block suspended or deleted users (if status column exists)
         try {
-          if (user.status === 'suspended') {
-            return done(null, false);
-          }
-          if (user.status === 'deleted') {
-            return done(null, false);
-          }
+          if (user.status === 'suspended') { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, NULL, NULL)', [username, user.id]); } catch {} ; return done(null, false); }
+          if (user.status === 'deleted') { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, NULL, NULL)', [username, user.id]); } catch {} ; return done(null, false); }
         } catch {}
 
         let ok = false;
@@ -94,7 +93,8 @@ export function setupAuth(app: Express) {
           }
         }
         console.log("Password check result:", ok);
-        if (!ok) return done(null, false);
+  if (!ok) { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, NULL, NULL)', [username, user.id]); } catch {} ; return done(null, false); }
+  try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, TRUE, NULL, NULL)', [username, user.id]); } catch {}
         return done(null, user);
       } catch (err) {
         return done(err);
@@ -179,6 +179,13 @@ export function setupAuth(app: Express) {
   passport.authenticate("local", (err: any, user: any, info: any) => {
     if (err) return next(err);
     if (!user) {
+      // Log failed attempt with IP and UA if we can associate a user
+      (async () => {
+        try {
+          const username = (req.body && (req.body.username || req.body.email || req.body.user)) || '';
+          await pool.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, NULL, FALSE, $2, $3)', [username, req.ip, req.get('User-Agent') || null]);
+        } catch {}
+      })();
       return res.status(401).json({ message: "Invalid username or password" });
     }
     req.login(user, (err) => {
@@ -192,7 +199,14 @@ export function setupAuth(app: Express) {
         storage.getUserPermissions(user.id).catch(() => [] as string[]),
         pool.query('SELECT default_currency FROM app_settings WHERE id = 1').then(r => r.rows[0]?.default_currency).catch(() => undefined)
       ]).then(([role, permissions, appDefaultCurrency]) => {
-        return res.json({
+        // Successful login activity log
+        (async () => {
+          try {
+            const { logActivity } = await import('./activity-loggers');
+            await logActivity({ userId: user.id, actionType: 'LOGIN', resourceType: 'USER', description: `User ${user.username} logged in`, ipAddress: req.ip, userAgent: req.get('User-Agent') });
+          } catch {}
+        })();
+  return res.json({
           ...userWithoutPassword,
           role: role,
           status: user.status,
