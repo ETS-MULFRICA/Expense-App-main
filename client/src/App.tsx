@@ -22,6 +22,7 @@ import SettingsPage from "@/pages/settings-page";
 import HistoryPage from "@/pages/history-page";
 import BudgetsPage from "@/pages/budgets-page";
 import AdminPage from "@/pages/admin-page";
+import AnnouncementsPage from "@/pages/announcements-page";
 
 // Create a component that redirects admin users to /admin
 function HomeRedirect() {
@@ -58,6 +59,8 @@ function Router() {
       <ProtectedRoute path="/reports" component={ReportsPage} />
       {/* User settings page - requires authentication */}
       <ProtectedRoute path="/settings" component={SettingsPage} />
+  {/* Announcements page - requires authentication */}
+  <ProtectedRoute path="/announcements" component={AnnouncementsPage} />
       {/* Expense history page - requires authentication */}
       <ProtectedRoute path="/history" component={HistoryPage} />
   {/* Admin panel - allow admin role OR admin.access permission */}

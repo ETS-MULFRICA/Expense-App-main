@@ -27,7 +27,7 @@ import {
 import { formatCurrency } from "@/lib/currency-formatter";
 import { 
   Loader2, PieChart, BarChart, User as UserIcon, Search, UserPlus, Trash2, 
-  Edit, RefreshCw, Home, DollarSign, History, FileText, TrendingUp, ShieldBan, ShieldCheck, KeyRound, Settings 
+  Edit, RefreshCw, Home, DollarSign, History, FileText, TrendingUp, ShieldBan, ShieldCheck, KeyRound, Settings, Flag, EyeOff, Check, XCircle, ArrowUpRight 
 } from "lucide-react";
 import { queryClient } from "@/lib/queryClient";
 import { exportExpensesToCSV, exportExpensesToPDF, exportIncomesToCSV, exportIncomesToPDF, exportBudgetsToCSV, exportBudgetsToPDF } from "@/lib/export-utils";
@@ -74,6 +74,7 @@ export default function AdminPage() {
   const [newUser, setNewUser] = useState({ username: "", name: "", email: "", role: "user" });
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<string>("all");
+  const [moderationActionLoading, setModerationActionLoading] = useState<number | null>(null);
 
   // Check if user is admin (legacy) or has admin.access permission
   useEffect(() => {
@@ -85,6 +86,13 @@ export default function AdminPage() {
       });
     }
   }, [user, toast]);
+
+  // Navigate directly to announcements tab if URL contains #announcements
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.hash === '#announcements') {
+      setSelectedTab('announcements');
+    }
+  }, []);
 
   // Fetch dashboard stats
   const { data: dashboardStats, isLoading: isLoadingDashboard } = useQuery<DashboardStats>({
@@ -373,7 +381,7 @@ export default function AdminPage() {
         </div>
 
         <Tabs value={selectedTab} onValueChange={setSelectedTab} className="space-y-6">
-          <TabsList className="grid grid-cols-8 max-w-4xl">
+          <TabsList className="grid grid-cols-10 max-w-6xl">
     <TabsTrigger value="dashboard">
               <Home className="h-4 w-4 mr-2" />
               Dashboard
@@ -414,6 +422,16 @@ export default function AdminPage() {
               <Settings className="h-4 w-4 mr-2" />
               System Settings
             </TabsTrigger>
+            <TabsTrigger value="announcements">
+              <FileText className="h-4 w-4 mr-2" />
+              Announcements
+            </TabsTrigger>
+            {(user?.role === 'admin' || hasPermission(user, 'moderation.manage')) && (
+            <TabsTrigger value="moderation">
+              <Flag className="h-4 w-4 mr-2" />
+              Moderation
+            </TabsTrigger>
+            )}
           </TabsList>
 
           {/* DASHBOARD TAB */}
@@ -971,6 +989,18 @@ export default function AdminPage() {
           <TabsContent value="system-settings">
             <AdminSettingsPage embedded />
           </TabsContent>
+
+          {/* ANNOUNCEMENTS TAB */}
+          <TabsContent value="announcements">
+            <AnnouncementsManager />
+          </TabsContent>
+
+          {/* MODERATION TAB */}
+          {(user?.role === 'admin' || hasPermission(user, 'moderation.manage')) && (
+            <TabsContent value="moderation">
+              <ModerationManager loadingId={moderationActionLoading} setLoadingId={setModerationActionLoading} />
+            </TabsContent>
+          )}
         </Tabs>
 
         {/* Delete User Confirmation Dialog */}
@@ -1159,5 +1189,167 @@ function RolesManager() {
         </div>
       </div>
     </div>
+  );
+}
+
+function AnnouncementsManager() {
+  const { toast } = useToast();
+  const { data, refetch, isLoading } = useQuery({
+    queryKey: ['/api/admin/announcements'],
+    queryFn: async () => {
+      const r = await fetch('/api/admin/announcements');
+      if (!r.ok) throw new Error('Failed to load announcements');
+      return r.json();
+    }
+  });
+
+  const [title, setTitle] = useState('');
+  const [message, setMessage] = useState('');
+  const [publishing, setPublishing] = useState(false);
+
+  const create = async () => {
+    if (!title.trim() || !message.trim()) {
+      toast({ title: 'Title and message are required', variant: 'destructive' });
+      return;
+    }
+    setPublishing(true);
+    try {
+      const r = await fetch('/api/admin/announcements', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: title.trim(), message: message.trim(), published: true })
+      });
+      if (!r.ok) throw new Error('Failed to create announcement');
+      setTitle(''); setMessage('');
+      await refetch();
+      toast({ title: 'Announcement sent' });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const remove = async (id: number) => {
+    const r = await fetch(`/api/admin/announcements/${id}`, { method: 'DELETE' });
+    if (!r.ok) {
+      toast({ title: 'Failed to delete', variant: 'destructive' });
+      return;
+    }
+    await refetch();
+    toast({ title: 'Deleted' });
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Announcements</CardTitle>
+        <CardDescription>Send a message to all users and view history</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid md:grid-cols-3 gap-4">
+          <div className="md:col-span-2 space-y-3">
+            <Input placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} />
+            <textarea className="w-full border rounded p-2 h-32" placeholder="Message" value={message} onChange={e => setMessage(e.target.value)} />
+            <Button onClick={create} disabled={publishing}>{publishing ? 'Sending…' : 'Send Announcement'}</Button>
+          </div>
+          <div>
+            <div className="text-sm text-gray-600">Recent (latest 20)</div>
+            {isLoading ? (
+              <div className="text-sm text-gray-500 mt-2">Loading…</div>
+            ) : (
+              <ul className="mt-2 space-y-2">
+                {data?.slice(0,20).map((a: any) => (
+                  <li key={a.id} className="border rounded p-2">
+                    <div className="font-medium">{a.title}</div>
+                    <div className="text-xs text-gray-500">{new Date(a.created_at).toLocaleString()} {a.author_name ? `• ${a.author_name}` : ''}</div>
+                    <div className="text-sm mt-1 line-clamp-3">{a.message}</div>
+                    <div className="text-right mt-2">
+                      <Button variant="destructive" size="sm" onClick={() => remove(a.id)}>Delete</Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ModerationManager({ loadingId, setLoadingId }: { loadingId: number | null; setLoadingId: (id: number | null) => void; }) {
+  const { toast } = useToast();
+  const { data, refetch, isLoading } = useQuery({
+    queryKey: ['/api/admin/reports'],
+    queryFn: async () => {
+      const r = await fetch('/api/admin/reports');
+      if (!r.ok) throw new Error('Failed to load reports');
+      return r.json();
+    }
+  });
+
+  const act = async (id: number, action: 'dismiss'|'hide'|'resolve'|'escalate') => {
+    setLoadingId(id);
+    try {
+      const r = await fetch(`/api/admin/reports/${id}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      if (!r.ok) throw new Error('Failed to update report');
+      await refetch();
+      toast({ title: `Report ${action}ed` });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setLoadingId(null);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Moderation Queue</CardTitle>
+        <CardDescription>Open and escalated reports</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>ID</TableHead>
+                <TableHead>Reporter</TableHead>
+                <TableHead>Target</TableHead>
+                <TableHead>Reason</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data && data.length ? data.map((r: any) => (
+                <TableRow key={r.id}>
+                  <TableCell>#{r.id}</TableCell>
+                  <TableCell>{r.reporter_name || r.reporter_user_id}</TableCell>
+                  <TableCell>{r.target_type} #{r.target_id}</TableCell>
+                  <TableCell className="max-w-md truncate">{r.reason || '-'}</TableCell>
+                  <TableCell>{r.status}</TableCell>
+                  <TableCell className="text-right">
+                    <div className="inline-flex gap-1">
+                      <Button size="sm" variant="outline" disabled={loadingId===r.id} onClick={() => act(r.id,'dismiss')}><XCircle className="h-4 w-4 mr-1" />Dismiss</Button>
+                      <Button size="sm" variant="outline" disabled={loadingId===r.id} onClick={() => act(r.id,'hide')}><EyeOff className="h-4 w-4 mr-1" />Hide</Button>
+                      <Button size="sm" variant="outline" disabled={loadingId===r.id} onClick={() => act(r.id,'resolve')}><Check className="h-4 w-4 mr-1" />Resolve</Button>
+                      <Button size="sm" variant="outline" disabled={loadingId===r.id} onClick={() => act(r.id,'escalate')}><ArrowUpRight className="h-4 w-4 mr-1" />Escalate</Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              )) : (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-center text-gray-500">No open reports</TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }

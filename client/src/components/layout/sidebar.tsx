@@ -1,6 +1,8 @@
 import { Link, useLocation } from "wouter";
 import { useEffect, useState } from "react";
 import { cn, hasPermission } from "@/lib/utils";
+import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/use-auth";
 import { 
   Home, 
@@ -52,8 +54,20 @@ export default function Sidebar() {
     { name: "Settings", href: "/settings", icon: Settings },
   ];
   
-  // Use admin navigation for admin users, regular navigation for others
-  const navigation = (user?.role === "admin" || hasPermission(user, 'admin.access')) ? adminNavigation : regularUserNavigation;
+  // Fetch unread announcements count
+  const { data: unread } = useQuery<{ count: number }>({
+    queryKey: ['/api/announcements/unread-count'],
+    enabled: !!user,
+  });
+
+  // Use admin navigation for admin users, regular navigation for others, and add Announcements link after Settings
+  const isAdminish = (user?.role === "admin" || hasPermission(user, 'admin.access'));
+  const baseNav = isAdminish ? adminNavigation : regularUserNavigation;
+  const announcementsHref = "/announcements";
+  const navigation = [
+    ...baseNav,
+    { name: "Announcements", href: announcementsHref, icon: ShieldAlert },
+  ];
 
   return (
     <div className="hidden lg:flex lg:flex-shrink-0">
@@ -75,6 +89,15 @@ export default function Sidebar() {
                 <Link
                   key={item.name}
                   href={item.href}
+                  onClick={async () => {
+                    if (item.name === 'Announcements') {
+                      // Mark announcements as read and refresh unread count badge
+                      try {
+                        await fetch('/api/announcements/mark-read', { method: 'POST' });
+                      } catch {}
+                      queryClient.invalidateQueries({ queryKey: ['/api/announcements/unread-count'] });
+                    }
+                  }}
                   className={cn(
                     location === item.href
                       ? "text-primary bg-primary/5"
@@ -83,7 +106,12 @@ export default function Sidebar() {
                   )}
                 >
                   <item.icon className="h-5 w-5 mr-3" />
-                  {item.name}
+                  <span className="flex-1">{item.name}</span>
+                  {item.name === 'Announcements' && (unread?.count ?? 0) > 0 && (
+                    <span className="ml-2 inline-flex items-center justify-center text-xs h-5 min-w-5 px-1 rounded-full bg-red-500 text-white">
+                      {(unread!.count) > 99 ? '99+' : unread!.count}
+                    </span>
+                  )}
                 </Link>
               ))}
             </nav>

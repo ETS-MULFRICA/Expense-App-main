@@ -13,7 +13,8 @@ import {
   insertExpenseSchema, legacyInsertExpenseSchema, 
   insertIncomeSchema, insertBudgetSchema, insertBudgetAllocationSchema,
   insertExpenseCategorySchema, insertExpenseSubcategorySchema,
-  insertIncomeCategorySchema, insertIncomeSubcategorySchema
+  insertIncomeCategorySchema, insertIncomeSubcategorySchema,
+  insertReportSchema, updateReportActionSchema
 } from "@shared/schema";
 import { z } from "zod";
 import { ZodError } from "zod";
@@ -111,6 +112,116 @@ function requirePermission(permission: string) {
  * Returns HTTP server instance for external configuration
  */
 export async function registerRoutes(app: Express): Promise<Server> {
+  // --- Announcements ---
+  // Public (authenticated) list of published announcements (latest first)
+  app.get('/api/announcements', requireAuth, async (req, res) => {
+    try {
+      const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+      let limit = parseInt(rawLimit ?? '20');
+      if (!Number.isFinite(limit) || limit <= 0) limit = 20;
+      if (limit > 500) limit = 500;
+      const r = await pool.query(
+        `SELECT a.id, a.title, a.message, a.created_at, u.name as author_name
+         FROM announcements a
+         LEFT JOIN users u ON u.id = a.created_by
+         WHERE a.published = TRUE
+         ORDER BY a.created_at DESC
+         LIMIT $1`,
+        [limit]
+      );
+      res.json(r.rows);
+    } catch (e) {
+      console.error('Fetch announcements failed', e);
+      res.status(500).json({ message: 'Failed to fetch announcements' });
+    }
+  });
+
+  // Unread count for current user
+  app.get('/api/announcements/unread-count', requireAuth, async (req, res) => {
+    try {
+      const r = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM announcements a
+         WHERE a.published = TRUE
+           AND NOT EXISTS (
+             SELECT 1 FROM announcement_reads ar
+             WHERE ar.user_id = $1 AND ar.announcement_id = a.id
+           )`,
+        [req.user!.id]
+      );
+      res.json({ count: r.rows[0]?.count ?? 0 });
+    } catch (e) {
+      console.error('Unread count failed', e);
+      res.status(500).json({ message: 'Failed to fetch unread count' });
+    }
+  });
+
+  // Mark all as read for current user
+  app.post('/api/announcements/mark-read', requireAuth, async (req, res) => {
+    try {
+      // Insert reads for any published announcement not yet read
+      await pool.query(
+        `INSERT INTO announcement_reads (user_id, announcement_id)
+         SELECT $1, a.id
+         FROM announcements a
+         WHERE a.published = TRUE
+           AND NOT EXISTS (
+             SELECT 1 FROM announcement_reads ar
+             WHERE ar.user_id = $1 AND ar.announcement_id = a.id
+           )`,
+        [req.user!.id]
+      );
+      res.status(204).send();
+    } catch (e) {
+      console.error('Mark read failed', e);
+      res.status(500).json({ message: 'Failed to mark announcements as read' });
+    }
+  });
+
+  // Admin: full history
+  app.get('/api/admin/announcements', requireAuth, requirePermission('admin.access'), async (_req, res) => {
+    try {
+      const r = await pool.query(
+        `SELECT a.id, a.title, a.message, a.published, a.created_at, u.name as author_name
+         FROM announcements a
+         LEFT JOIN users u ON u.id = a.created_by
+         ORDER BY a.created_at DESC`
+      );
+      res.json(r.rows);
+    } catch (e) {
+      console.error('Fetch admin announcements failed', e);
+      res.status(500).json({ message: 'Failed to fetch announcements' });
+    }
+  });
+
+  // Admin: create announcement
+  app.post('/api/admin/announcements', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const { title, message, published } = req.body || {};
+      if (!title || !message) return res.status(400).json({ message: 'title and message required' });
+      const r = await pool.query(
+        `INSERT INTO announcements (title, message, created_by, published)
+         VALUES ($1, $2, $3, COALESCE($4, TRUE)) RETURNING *`,
+        [title, message, req.user!.id, published]
+      );
+      res.status(201).json(r.rows[0]);
+    } catch (e) {
+      console.error('Create announcement failed', e);
+      res.status(500).json({ message: 'Failed to create announcement' });
+    }
+  });
+
+  // Admin: delete announcement
+  app.delete('/api/admin/announcements/:id', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      await pool.query('DELETE FROM announcements WHERE id = $1', [id]);
+      res.status(204).send();
+    } catch (e) {
+      console.error('Delete announcement failed', e);
+      res.status(500).json({ message: 'Failed to delete announcement' });
+    }
+  });
   // Lightweight capabilities endpoint: current user's permissions and app default currency
   app.get('/api/capabilities', requireAuth, async (req, res) => {
     try {
@@ -955,7 +1066,7 @@ app.post("/api/user-income-categories", requireAuth, async (req, res) => {
 // -------------------------------------------------------------------------
 app.get("/api/expenses", requireAuth, async (req, res) => {
   try {
-    const expenses = await storage.getExpensesByUserId(req.user!.id);
+  const expenses = await storage.getExpensesByUserId(req.user!.id);
     
     // Augment each expense with category and subcategory names
     const augmentedExpenses = await Promise.all(expenses.map(async (expense) => {
@@ -978,6 +1089,85 @@ res.json(augmentedExpenses);
   } catch (error) {
     console.error("Error fetching expenses:", error);
     res.status(500).json({ message: "Failed to fetch expenses" });
+  }
+});
+
+// --- Moderation & Reports ---
+// Create a report on a target (expense/income/budget)
+app.post('/api/reports', requireAuth, async (req, res) => {
+  try {
+    const data = insertReportSchema.parse(req.body || {});
+    // Basic existence check for targets
+    if (data.targetType === 'expense') {
+      const r = await pool.query('SELECT 1 FROM expenses WHERE id = $1 AND user_id = $2', [data.targetId, req.user!.id]);
+      if (r.rowCount === 0) return res.status(404).json({ message: 'Expense not found' });
+    } else if (data.targetType === 'income') {
+      const r = await pool.query('SELECT 1 FROM incomes WHERE id = $1 AND user_id = $2', [data.targetId, req.user!.id]);
+      if (r.rowCount === 0) return res.status(404).json({ message: 'Income not found' });
+    } else if (data.targetType === 'budget') {
+      const r = await pool.query('SELECT 1 FROM budgets WHERE id = $1 AND user_id = $2', [data.targetId, req.user!.id]);
+      if (r.rowCount === 0) return res.status(404).json({ message: 'Budget not found' });
+    }
+    const ins = await pool.query(
+      'INSERT INTO reports (reporter_user_id, target_type, target_id, reason) VALUES ($1,$2,$3,$4) RETURNING *',
+      [req.user!.id, data.targetType, data.targetId, data.reason]
+    );
+    try { await logActivity({ userId: req.user!.id, actionType: 'CREATE', resourceType: 'REPORT', resourceId: ins.rows[0].id, description: `Reported ${data.targetType} #${data.targetId}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+    res.status(201).json(ins.rows[0]);
+  } catch (e: any) {
+    if (e?.name === 'ZodError') return res.status(400).json({ message: 'Invalid report', errors: e.errors });
+    console.error('Create report error', e);
+    res.status(500).json({ message: 'Failed to create report' });
+  }
+});
+
+// Admin: list open reports
+app.get('/api/admin/reports', requireAuth, requirePermission('moderation.manage'), async (_req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT rep.*, u.name AS reporter_name
+       FROM reports rep
+       LEFT JOIN users u ON u.id = rep.reporter_user_id
+       WHERE rep.status IN ('open','escalated')
+       ORDER BY rep.created_at DESC`
+    );
+    res.json(r.rows);
+  } catch (e) {
+    console.error('List reports failed', e);
+    res.status(500).json({ message: 'Failed to list reports' });
+  }
+});
+
+// Admin: take action on a report
+app.post('/api/admin/reports/:id/action', requireAuth, requirePermission('moderation.manage'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const data = updateReportActionSchema.parse(req.body || {});
+    const r0 = await pool.query('SELECT * FROM reports WHERE id = $1', [id]);
+    const rep = r0.rows[0];
+    if (!rep) return res.status(404).json({ message: 'Report not found' });
+    let newStatus = rep.status;
+  if (data.action === 'dismiss') newStatus = 'dismissed';
+    if (data.action === 'resolve') newStatus = 'resolved';
+    if (data.action === 'escalate') newStatus = 'escalated';
+    if (data.action === 'hide') {
+      // Hide the target
+      if (rep.target_type === 'expense') await pool.query('UPDATE expenses SET is_hidden = TRUE WHERE id = $1', [rep.target_id]);
+      if (rep.target_type === 'income') await pool.query('UPDATE incomes SET is_hidden = TRUE WHERE id = $1', [rep.target_id]);
+      // For budget, we won't hide but mark resolved; could extend later
+      newStatus = 'resolved';
+    }
+    if (data.action === 'warn') newStatus = 'resolved';
+    await pool.query(
+      `UPDATE reports SET status = $1, resolution_note = COALESCE($2, resolution_note), resolved_by = $3, updated_at = NOW() WHERE id = $4`,
+      [newStatus, data.note || null, req.user!.id, id]
+    );
+    try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'REPORT', resourceId: id, description: `Report ${id} ${data.action}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+    res.status(204).send();
+  } catch (e: any) {
+    if (e?.name === 'ZodError') return res.status(400).json({ message: 'Invalid action', errors: e.errors });
+    console.error('Action on report failed', e);
+    res.status(500).json({ message: 'Failed to update report' });
   }
 });
 
@@ -2575,7 +2765,16 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requirePermission('
 
 app.get("/api/admin/expenses", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
-    const expenses = await storage.getAllExpenses();
+    const r = await pool.query(`
+      SELECT e.*, u.name as user_name
+      FROM expenses e
+      LEFT JOIN users u ON u.id = e.user_id
+      ORDER BY e.created_at DESC
+    `);
+    const expenses = r.rows.map((row: any) => ({
+      ...row,
+      userName: row.user_name,
+    }));
     
     // Log activity for admin viewing all expenses
     try {
@@ -2605,7 +2804,16 @@ app.get("/api/admin/expenses", requireAuth, requirePermission('admin.access'), a
 
 app.get("/api/admin/incomes", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
-    const incomes = await storage.getAllIncomes();
+    const r = await pool.query(`
+      SELECT i.*, u.name as user_name
+      FROM incomes i
+      LEFT JOIN users u ON u.id = i.user_id
+      ORDER BY i.created_at DESC
+    `);
+    const incomes = r.rows.map((row: any) => ({
+      ...row,
+      userName: row.user_name,
+    }));
     
     // Log activity for admin viewing all incomes
     try {

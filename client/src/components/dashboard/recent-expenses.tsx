@@ -42,6 +42,7 @@ import {
 import { Search } from "lucide-react";
 import { formatCurrency } from "@/lib/currency-formatter";
 import { getEffectiveCurrency } from "@/lib/utils";
+import { apiRequest as _apiRequest } from "@/lib/queryClient";
 
 // Map of category to icon color class (black and white only)
 const categoryIconColors: Record<string, string> = {
@@ -204,6 +205,20 @@ export default function RecentExpenses({
     deleteMutation.mutate(id);
   };
 
+  const reportExpense = async (id: number) => {
+    try {
+      const resp = await fetch('/api/reports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetType: 'expense', targetId: id, reason: 'User flagged expense' })
+      });
+      if (!resp.ok) throw new Error('Failed to report');
+      toast({ title: 'Reported', description: 'Expense has been flagged for review.' });
+    } catch (e: any) {
+      toast({ title: 'Report failed', description: e.message, variant: 'destructive' });
+    }
+  };
+
   const handleCloseEditDialog = () => {
     setIsEditDialogOpen(false);
     setEditingExpense(null);
@@ -353,6 +368,13 @@ export default function RecentExpenses({
                           onClick={() => handleEdit(expense)}
                         >
                           Edit
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          className="text-amber-600 hover:text-amber-700 mr-3"
+                          onClick={() => reportExpense(expense.id)}
+                        >
+                          Report
                         </Button>
                         
                         <AlertDialog>

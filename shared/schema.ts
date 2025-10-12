@@ -69,6 +69,7 @@ export const expenses = pgTable("expenses", {
   subcategoryId: integer("subcategory_id").references(() => expenseSubcategories.id),
   merchant: text("merchant"),
   notes: text("notes"),
+  isHidden: boolean("is_hidden").default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -84,7 +85,22 @@ export const incomes = pgTable("incomes", {
   subcategoryId: integer("subcategory_id").references(() => incomeSubcategories.id),
   source: text("source"),
   notes: text("notes"),
+  isHidden: boolean("is_hidden").default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Reports table (moderation)
+export const reports = pgTable("reports", {
+  id: serial("id").primaryKey(),
+  reporterUserId: integer("reporter_user_id").notNull().references(() => users.id),
+  targetType: text("target_type").notNull(),
+  targetId: integer("target_id").notNull(),
+  reason: text("reason"),
+  status: text("status").notNull().default("open"),
+  resolutionNote: text("resolution_note"),
+  resolvedBy: integer("resolved_by").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 // Budget planning table
@@ -196,6 +212,18 @@ export const insertBudgetAllocationSchema = createInsertSchema(budgetAllocations
     amount: true,
   });
 
+// Report schemas
+export const insertReportSchema = z.object({
+  targetType: z.enum(["expense","income","budget"]),
+  targetId: z.number().int().positive(),
+  reason: z.string().min(3).max(2000),
+});
+
+export const updateReportActionSchema = z.object({
+  action: z.enum(["dismiss","hide","resolve","escalate","warn"]),
+  note: z.string().max(2000).optional(),
+});
+
 // Client-side validation schemas
 export const clientExpenseSchema = insertExpenseSchema.extend({
   amount: z.number().positive({ message: 'Amount is required and must be positive' }),
@@ -246,3 +274,5 @@ export type Budget = typeof budgets.$inferSelect;
 export type InsertBudget = z.infer<typeof insertBudgetSchema>;
 export type BudgetAllocation = typeof budgetAllocations.$inferSelect;
 export type InsertBudgetAllocation = z.infer<typeof insertBudgetAllocationSchema>;
+export type Report = typeof reports.$inferSelect;
+export type InsertReport = z.infer<typeof insertReportSchema>;

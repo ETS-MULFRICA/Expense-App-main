@@ -15,6 +15,7 @@ import MainLayout from "@/components/layout/main-layout";
 import { ExportButton } from "@/components/ui/export-button";
 import { exportIncomesToCSV, exportIncomesToPDF } from "@/lib/export-utils";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
 import { AddIncomeDialog } from "@/components/income/add-income-dialog";
 import { EditIncomeDialog } from "@/components/income/edit-income-dialog";
 import { DeleteIncomeDialog } from "@/components/income/delete-income-dialog";
@@ -27,6 +28,7 @@ export default function IncomePage() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const { user } = useAuth();
+  const { toast } = useToast();
 
   const { data: incomes, isLoading: isLoadingIncomes } = useQuery<Income[]>({
     queryKey: ["/api/incomes"],
@@ -38,6 +40,15 @@ export default function IncomePage() {
   });
   
   const [enrichedIncomes, setEnrichedIncomes] = useState<(Income & { category: string })[]>([]);
+  const reportIncome = async (id: number) => {
+    try {
+      const r = await fetch('/api/reports', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetType: 'income', targetId: id, reason: 'User flagged income' }) });
+      if (!r.ok) throw new Error('Failed to report');
+      toast({ title: 'Reported', description: 'Income has been flagged for review.' });
+    } catch (e: any) {
+      toast({ title: 'Report failed', description: e.message, variant: 'destructive' });
+    }
+  };
   
   // Enrich incomes with category names
  useEffect(() => {
@@ -184,6 +195,14 @@ export default function IncomePage() {
                           }}
                         >
                           Edit
+                        </Button>
+                        <Button 
+                          variant="ghost" 
+                          size="sm" 
+                          className="text-amber-600 mr-1"
+                          onClick={() => reportIncome(income.id)}
+                        >
+                          Report
                         </Button>
                         <Button 
                           variant="ghost" 

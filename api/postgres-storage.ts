@@ -190,6 +190,7 @@ export class PostgresStorage {
           WHERE e.user_id = $1 
           AND e.date >= $2 
           AND e.date <= $3
+          AND COALESCE(e.is_hidden, FALSE) = FALSE
         `, [budget.user_id, budget.start_date, budget.end_date]);
 
         console.log('Expenses found for budget performance:', expensesResult.rows.length, expensesResult.rows);
@@ -446,7 +447,7 @@ export class PostgresStorage {
       SELECT e.*, c.name AS category_name
       FROM expenses e
       LEFT JOIN expense_categories c ON e.category_id = c.id
-      WHERE e.user_id = $1
+  WHERE e.user_id = $1 AND COALESCE(e.is_hidden, FALSE) = FALSE
     `, [userId]);
     return result.rows;
   }
@@ -491,7 +492,7 @@ export class PostgresStorage {
 
   // Income operations
   async getIncomesByUserId(userId: number): Promise<Income[]> {
-    const result = await pool.query('SELECT * FROM incomes WHERE user_id = $1', [userId]);
+  const result = await pool.query('SELECT * FROM incomes WHERE user_id = $1 AND COALESCE(is_hidden, FALSE) = FALSE', [userId]);
     // Map all fields to camelCase for TS compatibility
     return result.rows.map(row => ({
       id: row.id,
@@ -504,6 +505,7 @@ export class PostgresStorage {
       subcategoryId: row.subcategory_id,
       source: row.source,
       notes: row.notes,
+  isHidden: row.is_hidden,
       createdAt: row.created_at
     }));
   }
@@ -524,6 +526,7 @@ export class PostgresStorage {
       subcategoryId: row.subcategory_id,
       source: row.source,
       notes: row.notes,
+  isHidden: row.is_hidden,
       createdAt: row.created_at
     };
   }
@@ -554,6 +557,7 @@ export class PostgresStorage {
       subcategoryId: row.subcategory_id,
       source: row.source,
       notes: row.notes,
+  isHidden: row.is_hidden,
       createdAt: row.created_at
     };
   }

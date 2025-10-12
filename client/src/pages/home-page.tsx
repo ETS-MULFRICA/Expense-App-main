@@ -7,6 +7,7 @@ import RecentExpenses from "@/components/dashboard/recent-expenses";
 import AddExpenseDialog from "@/components/expense/add-expense-dialog";
 import { useAuth } from "@/hooks/use-auth";
 import MainLayout from "@/components/layout/main-layout";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function HomePage() {
   const [isAddExpenseOpen, setIsAddExpenseOpen] = useState(false);
@@ -15,6 +16,18 @@ export default function HomePage() {
   const { data: expenses, isLoading: isLoadingExpenses } = useQuery<Expense[]>({
     queryKey: ["/api/expenses"],
   });
+
+  const { data: announcements } = useQuery<any[]>({
+    queryKey: ["/api/announcements"],
+  });
+
+  useEffect(() => {
+    // If user navigated via sidebar Announcements link (hash), scroll to it
+    if (typeof window !== 'undefined' && window.location.hash === '#announcements') {
+      const el = document.getElementById('announcements-card');
+      el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, []);
 
   // Debug logging
   useEffect(() => {
@@ -105,6 +118,25 @@ export default function HomePage() {
         highestCategory={highestCategory}
         recentEntriesCount={recentExpensesCount}
       />
+
+      {announcements && announcements.length > 0 && (
+        <Card className="mt-6" id="announcements-card">
+          <CardHeader>
+            <CardTitle>Announcements</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ul className="space-y-3">
+              {announcements.slice(0,3).map(a => (
+                <li key={a.id} className="border rounded p-3">
+                  <div className="font-medium">{a.title}</div>
+                  <div className="text-sm text-gray-600 mt-1">{a.message}</div>
+                  <div className="text-xs text-gray-400 mt-1">{new Date(a.created_at).toLocaleString()} {a.author_name ? `• ${a.author_name}` : ''}</div>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
       
       <ExpenseChart expenses={expenses || []} />
       
