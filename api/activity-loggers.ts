@@ -23,8 +23,49 @@ export interface ActivityLogFilters {
 /**
  * Log user activity for security and accountability
  */
+// Serialize metadata with size cap to avoid heavy writes and errors
+function serializeMetadata(meta: any, maxBytes = 8192): string | null {
+  if (meta == null) return null;
+  try {
+    let raw = JSON.stringify(meta);
+    if (raw.length <= maxBytes) return raw;
+    // Try to summarize large metadata structures
+    const summarized = summarizeMetadata(meta);
+    raw = JSON.stringify(summarized);
+    if (raw.length <= maxBytes) return raw;
+    return JSON.stringify({ note: 'metadata truncated', originalSize: raw.length });
+  } catch {
+    return null;
+  }
+}
+
+function summarizeMetadata(value: any, depth = 0): any {
+  if (depth > 2) return typeof value;
+  if (Array.isArray(value)) {
+    const sample = value.slice(0, 3).map(v => summarizeMetadata(v, depth + 1));
+    return { type: 'array', length: value.length, sample };
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, any> = {};
+    let count = 0;
+    for (const k of Object.keys(value)) {
+      if (count >= 10) { out.__truncated__ = true; break; }
+      const v = (value as any)[k];
+      if (v == null) { out[k] = null; }
+      else if (typeof v === 'string') { out[k] = v.slice(0, 120); }
+      else if (typeof v === 'number' || typeof v === 'boolean') { out[k] = v; }
+      else if (Array.isArray(v)) { out[k] = { type: 'array', length: v.length, sample: v.slice(0, 2).map(s => summarizeMetadata(s, depth + 1)) }; }
+      else if (typeof v === 'object') { out[k] = summarizeMetadata(v, depth + 1); }
+      count++;
+    }
+    return out;
+  }
+  return value;
+}
+
 export async function logActivity(activity: ActivityLogEntry): Promise<void> {
   try {
+    const meta = serializeMetadata(activity.metadata);
     await pool.query(
       `INSERT INTO activity_log (user_id, action_type, resource_type, resource_id, description, ip_address, user_agent, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -36,13 +77,21 @@ export async function logActivity(activity: ActivityLogEntry): Promise<void> {
         activity.description,
         activity.ipAddress || null,
         activity.userAgent || null,
-        activity.metadata ? JSON.stringify(activity.metadata) : null
+        meta
       ]
     );
   } catch (error) {
     console.error('Failed to log activity:', error);
     // Don't throw error to avoid breaking the main functionality
   }
+}
+
+// Fire-and-forget logger to avoid blocking request latency
+export function logActivityAsync(activity: ActivityLogEntry): void {
+  // Schedule after response cycle when possible
+  setImmediate(() => {
+    logActivity(activity).catch(() => {});
+  });
 }
 
 /**

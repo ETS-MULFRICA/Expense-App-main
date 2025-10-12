@@ -1,3 +1,4 @@
+import { logActivity, logActivityAsync } from './activity-loggers';
 // Import Express types and HTTP server creation
 import type { Express, Request, Response } from "express";
 import cors from "cors";
@@ -22,7 +23,7 @@ import {
 import { z } from "zod";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
-import { logActivity } from "./activity-loggers"; // Adjust path as needed
+// duplicate import removed
 
 /**
  * Authentication Middleware
@@ -115,6 +116,9 @@ function requirePermission(permission: string) {
  * Returns HTTP server instance for external configuration
  */
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Simple in-memory cache for admin dashboard to reduce load on repeated views
+  let dashboardCache: { data: any; ts: number } | null = null;
+
   // --- Announcements ---
   // Public (authenticated) list of published announcements (latest first)
   app.get('/api/announcements', requireAuth, async (req, res) => {
@@ -663,7 +667,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.patch('/api/admin/settings', requireAuth, requirePermission('admin.access'), async (req, res) => {
     try {
-      const { siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates } = req.body || {};
+      const {
+        siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates,
+        timezone, dateFormat, primaryColor, themeMode, faviconDataUrl,
+        features, security
+      } = req.body || {};
       const r = await pool.query(
         `UPDATE app_settings SET 
            site_name = COALESCE($1, site_name),
@@ -672,10 +680,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
            language = COALESCE($4, language),
            email_from = COALESCE($5, email_from),
            email_templates = COALESCE($6, email_templates),
+           timezone = COALESCE($7, timezone),
+           date_format = COALESCE($8, date_format),
+           primary_color = COALESCE($9, primary_color),
+           theme_mode = COALESCE($10, theme_mode),
+           favicon_data_url = COALESCE($11, favicon_data_url),
+           features = COALESCE($12, features),
+           security = COALESCE($13, security),
            updated_at = NOW()
          WHERE id = 1
          RETURNING *`,
-        [siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates || null]
+        [
+          siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates || null,
+          timezone, dateFormat, primaryColor, themeMode, faviconDataUrl, features || null, security || null
+        ]
       );
       try { await logActivity({ userId: (req.user as any).id, actionType: 'UPDATE', resourceType: 'SETTINGS', description: 'Admin updated system settings', ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
       res.json(r.rows[0]);
@@ -1273,26 +1291,15 @@ app.post("/api/user-income-categories", requireAuth, async (req, res) => {
 // -------------------------------------------------------------------------
 app.get("/api/expenses", requireAuth, async (req, res) => {
   try {
-  const expenses = await storage.getExpensesByUserId(req.user!.id);
-    
-    // Augment each expense with category and subcategory names
-    const augmentedExpenses = await Promise.all(expenses.map(async (expense) => {
-      const category = await storage.getExpenseCategoryById(expense.categoryId);
-      
-      let subcategory = null;
-      if (expense.subcategoryId) {
-        subcategory = await storage.getExpenseSubcategoryById(expense.subcategoryId);
-      }
-      
-      return {
-        ...expense,
-        categoryName: category?.name || 'Unknown',
-        subcategoryName: subcategory?.name || null
-      };
+    const rows = await storage.getExpensesByUserId(req.user!.id);
+    // storage now returns category_name and subcategory_name via joins, avoid N+1
+    const mapped = rows.map((e: any) => ({
+      ...e,
+      categoryName: e.categoryName || e.category_name || 'Unknown',
+      subcategoryName: e.subcategoryName || e.subcategory_name || null,
     }));
-    
-console.log("[DEBUG] /api/expenses for userId:", req.user!.id, "expenses:", augmentedExpenses);
-res.json(augmentedExpenses);
+    console.log("[DEBUG] /api/expenses for userId:", req.user!.id, "count:", mapped.length);
+    res.json(mapped);
   } catch (error) {
     console.error("Error fetching expenses:", error);
     res.status(500).json({ message: "Failed to fetch expenses" });
@@ -1629,37 +1636,9 @@ app.delete("/api/expenses/:id", requireAuth, async (req, res) => {
 app.get("/api/incomes", requireAuth, async (req, res) => {
   try {
     const incomes = await storage.getIncomesByUserId(req.user!.id);
-    
-    // Augment each income with category and subcategory names
-    const augmentedIncomes = await Promise.all(incomes.map(async (income) => {
-      let categoryName = '';
-      
-      if (income.categoryId) {
-        // System or user-defined category
-        const category = await storage.getIncomeCategoryById(income.categoryId);
-        categoryName = category?.name || 'Unknown';
-      } else if (income.categoryName) {
-        // Custom category (stored directly in category_name field)
-        categoryName = income.categoryName;
-      } else {
-        // Fallback
-        categoryName = 'Uncategorized';
-      }
-      
-      let subcategory = null;
-      if (income.subcategoryId) {
-        subcategory = await storage.getIncomeSubcategoryById(income.subcategoryId);
-      }
-      
-      return {
-        ...income,
-        categoryName: categoryName,
-        subcategoryName: subcategory?.name || null
-      };
-    }));
-    
-console.log("[DEBUG] /api/incomes for userId:", req.user!.id, "incomes:", augmentedIncomes);
-res.json(augmentedIncomes);
+    // storage returns categoryName and subcategoryName already; avoid N+1
+    console.log("[DEBUG] /api/incomes for userId:", req.user!.id, "count:", incomes.length);
+    res.json(incomes);
   } catch (error) {
     console.error("Error fetching incomes:", error);
     res.status(500).json({ message: "Failed to fetch incomes" });
@@ -3126,6 +3105,11 @@ app.get("/api/admin/budgets", requireAuth, requirePermission('admin.access'), as
 // Admin Dashboard Main Route
 app.get("/api/admin/dashboard", requireAuth, requirePermission('admin.access'), async (req, res) => {
   try {
+    // Serve cached response if within TTL (30s)
+    const now = Date.now();
+    if (dashboardCache && (now - dashboardCache.ts) < 30_000) {
+      return res.json(dashboardCache.data);
+    }
     // Get comprehensive dashboard stats
     const [
       usersStats,
@@ -3227,9 +3211,12 @@ app.get("/api/admin/dashboard", requireAuth, requirePermission('admin.access'), 
       topCategories: topCategories.rows
     };
 
-    // Log activity for admin viewing dashboard
+  // Cache result
+  dashboardCache = { data: dashboardData, ts: Date.now() };
+
+  // Log activity for admin viewing dashboard
     try {
-      await logActivity({
+  logActivityAsync({
         userId: req.user!.id,
         actionType: 'VIEW',
         resourceType: 'DASHBOARD',
@@ -3240,13 +3227,13 @@ app.get("/api/admin/dashboard", requireAuth, requirePermission('admin.access'), 
           adminAction: 'view-dashboard',
           stats: dashboardData
         }
-      });
+  });
       console.log('[DEBUG] Activity logged for admin viewing dashboard');
     } catch (logError) {
       console.error('Failed to log admin dashboard view activity:', logError);
     }
 
-    res.json(dashboardData);
+  res.json(dashboardData);
   } catch (error) {
     console.error("Error fetching admin dashboard:", error);
     res.status(500).json({ message: "Failed to fetch admin dashboard" });
@@ -3441,7 +3428,7 @@ app.get("/api/activity-logs", requireAuth, async (req, res) => {
 
     // Log activity for viewing activity logs
     try {
-      await logActivity({
+  logActivityAsync({
         userId: req.user!.id,
         actionType: 'VIEW',
         resourceType: 'REPORT',
@@ -3458,7 +3445,7 @@ app.get("/api/activity-logs", requireAuth, async (req, res) => {
           totalCount: totalCount,
           isAdmin: isAdmin
         }
-      });
+  });
       console.log('[DEBUG] Activity logged for viewing activity history');
     } catch (logError) {
       console.error('Failed to log activity history view:', logError);
