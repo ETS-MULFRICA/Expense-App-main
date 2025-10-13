@@ -8,7 +8,16 @@ import { setupVite, serveStatic, log } from "./vite";
 import { runMigrationScript } from "./db";
 
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 dotenv.config();
+// Load optional local overrides (e.g., Windows tool paths)
+try {
+  const localEnvPath = path.resolve(process.cwd(), '.env.local');
+  if (fs.existsSync(localEnvPath)) {
+    dotenv.config({ path: localEnvPath, override: true });
+  }
+} catch {}
 
 // Create Express application instance
 const app = express();

@@ -332,6 +332,45 @@ export default function AdminPage() {
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   };
 
+  // Export helpers that fetch data on demand so exports work from Analytics tab
+  const exportBudgetsCsv = async () => {
+    try {
+      const r = await fetch('/api/admin/budgets');
+      if (!r.ok) throw new Error('Failed to load budgets');
+      const data = await r.json();
+      exportBudgetsToCSV(data as any, getEffectiveCurrency(user || undefined));
+      toast({ title: 'Export started', description: 'Budgets CSV download should begin shortly.' });
+    } catch (e:any) {
+      toast({ title: 'Export failed', description: e?.message || 'Could not export budgets', variant: 'destructive' });
+    }
+  };
+
+  const exportExpensesPdf = async () => {
+    try {
+      const r = await fetch('/api/admin/expenses');
+      if (!r.ok) throw new Error('Failed to load expenses');
+      const data = await r.json();
+      const rows = (data || []).map((e:any)=> ({ ...e, category: e.categoryName || 'Uncategorized' }));
+      exportExpensesToPDF(rows as any, getEffectiveCurrency(user || undefined));
+      toast({ title: 'Export started', description: 'Expenses PDF download should begin shortly.' });
+    } catch (e:any) {
+      toast({ title: 'Export failed', description: e?.message || 'Could not export expenses', variant: 'destructive' });
+    }
+  };
+
+  const exportIncomesPdf = async () => {
+    try {
+      const r = await fetch('/api/admin/incomes');
+      if (!r.ok) throw new Error('Failed to load incomes');
+      const data = await r.json();
+      const rows = (data || []).map((i:any)=> ({ ...i, category: i.categoryName || 'Uncategorized' }));
+      exportIncomesToPDF(rows as any, getEffectiveCurrency(user || undefined));
+      toast({ title: 'Export started', description: 'Incomes PDF download should begin shortly.' });
+    } catch (e:any) {
+      toast({ title: 'Export failed', description: e?.message || 'Could not export incomes', variant: 'destructive' });
+    }
+  };
+
   if (user?.role !== "admin" && !hasPermission(user, 'admin.access')) {
     return (
       <MainLayout>
@@ -554,14 +593,54 @@ export default function AdminPage() {
                 </div>
 
                 {analyticsTab==='trends' && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    {/* Quick stats for trends */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm font-medium">Daily Active Users (today)</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="text-2xl font-bold">{dashboardStats.users.dailyActive}</div>
+                          <p className="text-xs text-muted-foreground">Unique users active today</p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm font-medium">30‑Day Expense Total</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="text-2xl font-bold">
+                            {formatCurrency((dashboardStats.expenseTrends||[]).reduce((s:any,d:any)=> s + (Number(d.total_amount)||0), 0), getEffectiveCurrency(user || undefined))}
+                          </div>
+                          <p className="text-xs text-muted-foreground">Sum of last 30 days</p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm font-medium">Avg Daily Spend (30d)</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="text-2xl font-bold">
+                            {formatCurrency(((dashboardStats.expenseTrends||[]).reduce((s:any,d:any)=> s + (Number(d.total_amount)||0), 0) / Math.max((dashboardStats.expenseTrends||[]).length||1,1)), getEffectiveCurrency(user || undefined))}
+                          </div>
+                          <p className="text-xs text-muted-foreground">Average per day</p>
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <Card>
                       <CardHeader>
                         <CardTitle>Daily Active Users</CardTitle>
                         <CardDescription>User engagement over time</CardDescription>
                       </CardHeader>
                       <CardContent>
-                        <MiniLineChart data={(dashboardStats.dailyActiveSeries||[]).map(p=>({ x: new Date(p.date).getTime(), y: p.value }))} height={220} />
+                        {(dashboardStats.dailyActiveSeries||[]).length ? (
+                          <MiniLineChart data={(dashboardStats.dailyActiveSeries||[]).map(p=>({ x: new Date(p.date).getTime(), y: p.value }))} height={220} />
+                        ) : (
+                          <div className="text-sm text-gray-500">No activity yet</div>
+                        )}
                       </CardContent>
                     </Card>
                     <Card>
@@ -570,9 +649,14 @@ export default function AdminPage() {
                         <CardDescription>Daily spending patterns</CardDescription>
                       </CardHeader>
                       <CardContent>
-                        <MiniBarChart data={dashboardStats.expenseTrends||[]} height={220} />
+                        {(dashboardStats.expenseTrends||[]).length ? (
+                          <MiniBarChart data={dashboardStats.expenseTrends||[]} height={220} />
+                        ) : (
+                          <div className="text-sm text-gray-500">No expense data yet</div>
+                        )}
                       </CardContent>
                     </Card>
+                    </div>
                   </div>
                 )}
 
@@ -624,9 +708,9 @@ export default function AdminPage() {
                     </CardHeader>
                     <CardContent>
                       <div className="flex flex-wrap gap-2">
-                        <Button variant="outline" size="sm" onClick={() => { if (budgets && budgets.length) exportBudgetsToCSV(budgets as any, getEffectiveCurrency(user || undefined)); }}>Export Budgets CSV</Button>
-                        <Button variant="outline" size="sm" onClick={() => { if (expenses && expenses.length) { const rows = expenses.map((e:any)=>({ ...e, category: e.categoryName || 'Uncategorized' })); exportExpensesToPDF(rows as any); } }}>Export Expenses PDF</Button>
-                        <Button variant="outline" size="sm" onClick={() => { if (incomes && incomes.length) { const rows = incomes.map((i:any)=>({ ...i, category: i.categoryName || 'Uncategorized' })); exportIncomesToPDF(rows as any); } }}>Export Incomes PDF</Button>
+                        <Button variant="outline" size="sm" onClick={exportBudgetsCsv}>Export Budgets CSV</Button>
+                        <Button variant="outline" size="sm" onClick={exportExpensesPdf}>Export Expenses PDF</Button>
+                        <Button variant="outline" size="sm" onClick={exportIncomesPdf}>Export Incomes PDF</Button>
                         <Button size="sm" onClick={exportOverview}>Export Overview CSV</Button>
                       </div>
                     </CardContent>
@@ -788,7 +872,7 @@ export default function AdminPage() {
             </Card>
           </TabsContent>
 
-          {/* EXPENSES TAB - Keep your existing expenses tab content */}
+          {/* EXPENSES TAB */}
           <TabsContent value="expenses">
             <Card>
               <CardHeader>
@@ -798,6 +882,29 @@ export default function AdminPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
+                {/* Total expenses summary */}
+                {expenses && expenses.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Total Expenses</div>
+                        <div className="text-2xl font-semibold mt-1">{formatCurrency(expenses.reduce((s:number,e:any)=>s+ (Number(e.amount)||0),0), getEffectiveCurrency(user || undefined))}</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Transactions</div>
+                        <div className="text-2xl font-semibold mt-1">{expenses.length}</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Avg. Expense</div>
+                        <div className="text-2xl font-semibold mt-1">{formatCurrency(expenses.reduce((s:number,e:any)=>s+ (Number(e.amount)||0),0)/Math.max(expenses.length,1), getEffectiveCurrency(user || undefined))}</div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
                 {isLoadingExpenses ? (
                   <div className="flex justify-center py-8">
                     <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
@@ -861,6 +968,29 @@ export default function AdminPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
+                {/* Total incomes summary */}
+                {incomes && incomes.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Total Incomes</div>
+                        <div className="text-2xl font-semibold mt-1">{formatCurrency(incomes.reduce((s:number,i:any)=>s+ (Number(i.amount)||0),0), getEffectiveCurrency(user || undefined))}</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Transactions</div>
+                        <div className="text-2xl font-semibold mt-1">{incomes.length}</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Avg. Income</div>
+                        <div className="text-2xl font-semibold mt-1">{formatCurrency(incomes.reduce((s:number,i:any)=>s+ (Number(i.amount)||0),0)/Math.max(incomes.length,1), getEffectiveCurrency(user || undefined))}</div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
                 {isLoadingIncomes ? (
                   <div className="flex justify-center py-8">
                     <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
@@ -916,7 +1046,7 @@ export default function AdminPage() {
             </Card>
           </TabsContent>
 
-          {/* BUDGETS TAB - Keep your existing budgets tab content */}
+          {/* BUDGETS TAB */}
           <TabsContent value="budgets">
             <Card>
               <CardHeader>
@@ -926,6 +1056,29 @@ export default function AdminPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
+                {/* Total budgets summary */}
+                {budgets && budgets.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Total Budget Amount</div>
+                        <div className="text-2xl font-semibold mt-1">{formatCurrency(budgets.reduce((s:number,b:any)=>s+ (Number(b.amount)||0),0), getEffectiveCurrency(user || undefined))}</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Budgets</div>
+                        <div className="text-2xl font-semibold mt-1">{budgets.length}</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="py-4">
+                        <div className="text-xs text-gray-600">Avg. Budget</div>
+                        <div className="text-2xl font-semibold mt-1">{formatCurrency(budgets.reduce((s:number,b:any)=>s+ (Number(b.amount)||0),0)/Math.max(budgets.length,1), getEffectiveCurrency(user || undefined))}</div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
                 {isLoadingBudgets ? (
                   <div className="flex justify-center py-8">
                     <Loader2 className="h-8 w-8 animate-spin text-gray-400" />

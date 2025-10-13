@@ -9,7 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
-import { RefreshCw, Save, X } from 'lucide-react';
+import { Save, X } from 'lucide-react';
 
 export default function AdminSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const { toast } = useToast();
@@ -163,8 +163,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
           <h2 className='text-2xl font-semibold'>System Settings</h2>
           <p className='text-sm text-gray-600'>Manage app-wide configuration</p>
         </div>
-        <div className='flex items-center gap-2'>
-          <Button variant='outline' onClick={load}><RefreshCw className='h-4 w-4 mr-2'/>Refresh</Button>
+  <div className='flex items-center gap-2'>
           <Button variant='outline' disabled={!modified} onClick={discard}><X className='h-4 w-4 mr-2'/>Discard</Button>
           <Button disabled={!modified} onClick={handleSave}><Save className='h-4 w-4 mr-2'/>Save Changes</Button>
         </div>
@@ -255,18 +254,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
           </Section>
         </TabsContent>
         <TabsContent value='email' className='space-y-4 mt-4'>
-          <Section title='Email Settings' badge={modified ? 'Modified' : undefined}>
-            <div>
-              <Label>From Email (optional)</Label>
-              <Input value={emailFrom} onChange={e => setEmailFrom(e.target.value)} placeholder='no-reply@example.com' />
-            </div>
-            <div>
-              <Label>Email Templates JSON (optional)</Label>
-              <textarea className='w-full border rounded p-2 text-sm' rows={6} value={JSON.stringify(emailTemplates, null, 2)} onChange={e => {
-                try { setEmailTemplates(JSON.parse(e.target.value)); } catch {}
-              }} />
-            </div>
-          </Section>
+          {/* Removed first Email Settings panel per request; keep only direct email */}
           <Section title='Send Direct Email' badge={undefined}>
             <DirectEmailPanel />
           </Section>
