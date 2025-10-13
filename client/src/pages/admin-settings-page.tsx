@@ -17,7 +17,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
   // Base
   const [siteName, setSiteName] = useState('ExpenseTrack');
   const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
-  const [faviconDataUrl, setFaviconDataUrl] = useState<string | null>(null);
+  // Removed favicon from site info per request
   const [defaultCurrency, setDefaultCurrency] = useState('XAF');
   const [language, setLanguage] = useState('en');
   const [timezone, setTimezone] = useState('UTC');
@@ -42,7 +42,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       if (s) {
         setSiteName(s.site_name ?? 'ExpenseTrack');
         setLogoDataUrl(s.logo_data_url ?? null);
-        setFaviconDataUrl(s.favicon_data_url ?? null);
+  // favicon removed from UI
         setDefaultCurrency(s.default_currency ?? 'XAF');
         setLanguage(s.language ?? 'en');
         setTimezone(s.timezone ?? 'UTC');
@@ -70,22 +70,16 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     reader.readAsDataURL(file);
   };
 
-  const handleFaviconUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setFaviconDataUrl(reader.result as string);
-    reader.readAsDataURL(file);
-  };
+  // favicon upload removed
 
   const handleSave = async () => {
     const resp = await fetch('/api/admin/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates,
-  timezone, dateFormat, faviconDataUrl, features, security
-      })
+  body: JSON.stringify({
+    siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates,
+  timezone, dateFormat, /* faviconDataUrl removed */ features, security
+  })
     });
     if (!resp.ok) {
       toast({ title: 'Error', description: 'Failed to save settings', variant: 'destructive' });
@@ -102,7 +96,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     const current: any = {
       site_name: siteName,
       logo_data_url: logoDataUrl,
-      favicon_data_url: faviconDataUrl,
+  // favicon_data_url removed
       default_currency: defaultCurrency,
       language,
       timezone,
@@ -116,7 +110,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     return JSON.stringify(current) !== JSON.stringify({
       site_name: initial.site_name,
       logo_data_url: initial.logo_data_url,
-      favicon_data_url: initial.favicon_data_url,
+  // favicon_data_url removed
       default_currency: initial.default_currency,
       language: initial.language,
       timezone: initial.timezone,
@@ -127,7 +121,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       features: initial.features,
       security: initial.security,
     });
-  }, [initial, siteName, logoDataUrl, faviconDataUrl, defaultCurrency, language, timezone, dateFormat, emailFrom, emailTemplates, features, security]);
+  }, [initial, siteName, logoDataUrl, defaultCurrency, language, timezone, dateFormat, emailFrom, emailTemplates, features, security]);
 
   if (loading) return embedded ? <div className='p-6'>Loading…</div> : <MainLayout><div className='p-6'>Loading…</div></MainLayout>;
 
@@ -135,7 +129,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     if (!initial) return;
     setSiteName(initial.site_name ?? 'ExpenseTrack');
     setLogoDataUrl(initial.logo_data_url ?? null);
-    setFaviconDataUrl(initial.favicon_data_url ?? null);
+  // favicon removed
     setDefaultCurrency(initial.default_currency ?? 'XAF');
     setLanguage(initial.language ?? 'en');
     setTimezone(initial.timezone ?? 'UTC');
@@ -197,13 +191,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
                 <Input type='file' accept='image/*' onChange={handleLogoUpload} />
               </div>
             </div>
-            <div>
-              <Label>Favicon</Label>
-              <div className='flex items-center gap-3'>
-                {faviconDataUrl ? <img src={faviconDataUrl} className='h-8 w-8 object-contain border' /> : <div className='h-8 w-8 border rounded' />}
-                <Input type='file' accept='image/*' onChange={handleFaviconUpload} />
-              </div>
-            </div>
+            {/* Favicon control removed as requested */}
             <div>
               <Label>Default Currency</Label>
               <Select value={defaultCurrency} onValueChange={setDefaultCurrency}>
@@ -279,6 +267,9 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
               }} />
             </div>
           </Section>
+          <Section title='Send Direct Email' badge={undefined}>
+            <DirectEmailPanel />
+          </Section>
         </TabsContent>
         <TabsContent value='security' className='space-y-4 mt-4'>
           <Section title='Security' badge={modified ? 'Modified' : undefined}>
@@ -319,4 +310,67 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
   );
 
   return embedded ? content : <MainLayout>{content}</MainLayout>;
+}
+
+function DirectEmailPanel() {
+  const { toast } = useToast();
+  const [toUserId, setToUserId] = useState<string>('');
+  const [toEmail, setToEmail] = useState<string>('');
+  const [subject, setSubject] = useState<string>('');
+  const [body, setBody] = useState<string>('');
+  const [sending, setSending] = useState(false);
+
+  const sendEmail = async () => {
+    if (!subject.trim() || !body.trim()) { toast({ title: 'Subject and message required', variant: 'destructive' }); return; }
+    setSending(true);
+    try {
+      const r = await fetch('/api/admin/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          toUserId: toUserId ? Number(toUserId) : undefined,
+          toEmail: toEmail || undefined,
+          subject: subject.trim(),
+          html: body.includes('<') ? body : undefined,
+          text: body.includes('<') ? undefined : body
+        })
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(()=>({}));
+        throw new Error(e?.message || 'Failed to send');
+      }
+      toast({ title: 'Email sent' });
+      setToUserId(''); setToEmail(''); setSubject(''); setBody('');
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <Label>To (User ID)</Label>
+          <Input value={toUserId} onChange={e=>setToUserId(e.target.value)} placeholder="e.g., 42" />
+        </div>
+        <div className="md:col-span-2">
+          <Label>Or To Email</Label>
+          <Input value={toEmail} onChange={e=>setToEmail(e.target.value)} placeholder="user@example.com" />
+        </div>
+      </div>
+      <div>
+        <Label>Subject</Label>
+        <Input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="Subject" />
+      </div>
+      <div>
+        <Label>Message (plain text or HTML)</Label>
+        <textarea className="w-full border rounded p-2 text-sm min-h-32" value={body} onChange={e=>setBody(e.target.value)} />
+      </div>
+      <div className="text-right">
+        <Button onClick={sendEmail} disabled={sending}>{sending ? 'Sending…' : 'Send Email'}</Button>
+      </div>
+    </div>
+  );
 }

@@ -65,13 +65,14 @@ export function setupAuth(app: Express) {
         const user = result.rows[0];
         console.log("Authenticating user:",{ user, username });
         if (!user) {
-          try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, NULL, FALSE, NULL, NULL)', [username]); } catch {}
+          // No user found: record failed attempt (IP/UA filled in /api/login handler too)
+          try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, NULL, FALSE, $2, $3)', [username, (global as any).__lastReqIp || null, (global as any).__lastReqUA || null]); } catch {}
           return done(null, false);
         }
         // Block suspended or deleted users (if status column exists)
         try {
-          if (user.status === 'suspended') { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, NULL, NULL)', [username, user.id]); } catch {} ; return done(null, false); }
-          if (user.status === 'deleted') { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, NULL, NULL)', [username, user.id]); } catch {} ; return done(null, false); }
+          if (user.status === 'suspended') { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, $3, $4)', [username, user.id, (global as any).__lastReqIp || null, (global as any).__lastReqUA || null]); } catch {} ; return done(null, false); }
+          if (user.status === 'deleted') { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, $3, $4)', [username, user.id, (global as any).__lastReqIp || null, (global as any).__lastReqUA || null]); } catch {} ; return done(null, false); }
         } catch {}
 
         let ok = false;
@@ -93,8 +94,8 @@ export function setupAuth(app: Express) {
           }
         }
         console.log("Password check result:", ok);
-  if (!ok) { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, NULL, NULL)', [username, user.id]); } catch {} ; return done(null, false); }
-  try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, TRUE, NULL, NULL)', [username, user.id]); } catch {}
+  if (!ok) { try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, FALSE, $3, $4)', [username, user.id, (global as any).__lastReqIp || null, (global as any).__lastReqUA || null]); } catch {} ; return done(null, false); }
+  try { await client.query('INSERT INTO login_attempts (username, user_id, success, ip_address, user_agent) VALUES ($1, $2, TRUE, $3, $4)', [username, user.id, (global as any).__lastReqIp || null, (global as any).__lastReqUA || null]); } catch {}
         return done(null, user);
       } catch (err) {
         return done(err);
@@ -176,6 +177,9 @@ export function setupAuth(app: Express) {
   app.post("/api/login", (req, res, next) => {
   console.log("[DEBUG] /api/login headers:", req.headers);
   console.log("[DEBUG] /api/login body:", req.body);
+  // expose IP/UA for LocalStrategy logging
+  ;(global as any).__lastReqIp = req.ip;
+  ;(global as any).__lastReqUA = req.get('User-Agent') || null;
   passport.authenticate("local", (err: any, user: any, info: any) => {
     if (err) return next(err);
     if (!user) {

@@ -6,6 +6,7 @@ import { corsOptions } from "./cors-config";
 import { createServer, type Server } from "http";
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 // Import database storage layer
 import { storage } from "./storage";
@@ -116,6 +117,9 @@ function requirePermission(permission: string) {
  * Returns HTTP server instance for external configuration
  */
 export async function registerRoutes(app: Express): Promise<Server> {
+  // ESM __dirname shim
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
   // Simple in-memory cache for admin dashboard to reduce load on repeated views
   let dashboardCache: { data: any; ts: number } | null = null;
 
@@ -248,33 +252,72 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // --- Backups (Admin) ---
   app.post('/api/admin/backup', requireAuth, requirePermission('admin.access'), async (req, res) => {
     try {
+      // Parse DB connection from env (supports DATABASE_URL)
+      const parseDbUrl = (url?: string) => {
+        if (!url) return null;
+        try {
+          const u = new URL(url);
+          if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') return null;
+          return {
+            host: u.hostname,
+            port: u.port || '5432',
+            user: decodeURIComponent(u.username),
+            password: decodeURIComponent(u.password),
+            database: u.pathname.replace(/^\//, ''),
+          };
+        } catch {
+          return null;
+        }
+      };
+      const fromUrl = parseDbUrl(process.env.DATABASE_URL);
+      const DB_HOST = fromUrl?.host || process.env.DB_HOST;
+      const DB_PORT = fromUrl?.port || process.env.DB_PORT || '5432';
+      const DB_USER = fromUrl?.user || process.env.DB_USER;
+      const DB_PASSWORD = fromUrl?.password || process.env.DB_PASSWORD;
+      const DB_NAME = fromUrl?.database || process.env.DB_NAME;
+      if (!DB_HOST || !DB_USER || !DB_NAME) {
+        return res.status(400).json({ message: 'Database backup not configured. Set DATABASE_URL or DB_HOST, DB_USER, DB_NAME (and DB_PASSWORD if required).'});
+      }
+
       const backupsDir = path.resolve(__dirname, '../backups');
       if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const file = path.join(backupsDir, `backup-${ts}.sql`);
       // Use pg_dump; require PG env vars to be set
       const args = [
-        `--host=${process.env.DB_HOST || 'localhost'}`,
-        `--port=${process.env.DB_PORT || '5432'}`,
-        `--username=${process.env.DB_USER || ''}`,
+        `--host=${DB_HOST}`,
+        `--port=${DB_PORT}`,
+        `--username=${DB_USER}`,
         `--no-owner`,
-        `${process.env.DB_NAME || ''}`
+        `${DB_NAME}`
       ];
-      const env = { ...process.env };
+      const env = { ...process.env } as any;
       // If password set, use PGPASSWORD for pg_dump
-      if (process.env.DB_PASSWORD) env.PGPASSWORD = process.env.DB_PASSWORD;
-      const proc = spawn('pg_dump', args, { env });
+      if (DB_PASSWORD) env.PGPASSWORD = DB_PASSWORD;
+      const pgDumpBin = process.env.PG_DUMP_PATH || 'pg_dump';
+      const proc = spawn(pgDumpBin, args, { env });
+      let responded = false;
       const w = fs.createWriteStream(file);
+      const fail = (msg: string, err?: any) => {
+        if (responded) return; responded = true;
+        try { w.destroy(); } catch {}
+        console.error(msg, err || '');
+        res.status(500).json({ ok: false, message: msg, error: typeof err === 'string' ? err : (err?.message || String(err || '')) });
+      };
+      w.on('error', (e) => fail('Backup failed writing file', e));
+      proc.on('error', (e) => fail('Backup failed to start. Ensure pg_dump is installed (or set PG_DUMP_PATH).', e));
       proc.stdout.pipe(w);
       let stderr = '';
       proc.stderr.on('data', d => stderr += d.toString());
       proc.on('close', async (code) => {
+        if (responded) return;
         if (code === 0) {
           try { await logActivity({ userId: req.user!.id, actionType: 'VIEW', resourceType: 'REPORT', description: `Admin triggered backup ${path.basename(file)}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+          responded = true;
           return res.json({ ok: true, file: path.basename(file) });
         } else {
           console.error('pg_dump failed', stderr);
-          return res.status(500).json({ ok: false, message: 'Backup failed', error: stderr.trim() });
+          return fail('Backup failed. Ensure pg_dump is installed and available in PATH or set PG_DUMP_PATH. Also verify DB env vars/DATABASE_URL.', stderr.trim());
         }
       });
     } catch (e) {
@@ -327,32 +370,110 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (process.env.NODE_ENV === 'production' && process.env.ENABLE_RESTORE !== 'yes') {
         return res.status(403).json({ message: 'Restore disabled in production (set ENABLE_RESTORE=yes to allow)' });
       }
+      // Parse DB connection from env (supports DATABASE_URL)
+      const parseDbUrl = (url?: string) => {
+        if (!url) return null;
+        try {
+          const u = new URL(url);
+          if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') return null;
+          return {
+            host: u.hostname,
+            port: u.port || '5432',
+            user: decodeURIComponent(u.username),
+            password: decodeURIComponent(u.password),
+            database: u.pathname.replace(/^\//, ''),
+          };
+        } catch {
+          return null;
+        }
+      };
+      const fromUrl = parseDbUrl(process.env.DATABASE_URL);
+      const DB_HOST = fromUrl?.host || process.env.DB_HOST || 'localhost';
+      const DB_PORT = fromUrl?.port || process.env.DB_PORT || '5432';
+      const DB_USER = fromUrl?.user || process.env.DB_USER || '';
+      const DB_PASSWORD = fromUrl?.password || process.env.DB_PASSWORD;
+      const DB_NAME = fromUrl?.database || process.env.DB_NAME || '';
       const args = [
-        `--host=${process.env.DB_HOST || 'localhost'}`,
-        `--port=${process.env.DB_PORT || '5432'}`,
-        `--username=${process.env.DB_USER || ''}`,
-        `${process.env.DB_NAME || ''}`
+        `--host=${DB_HOST}`,
+        `--port=${DB_PORT}`,
+        `--username=${DB_USER}`,
+        `${DB_NAME}`
       ];
-      const env = { ...process.env };
-      if (process.env.DB_PASSWORD) env.PGPASSWORD = process.env.DB_PASSWORD;
-      const proc = spawn('psql', args, { env });
+      const env = { ...process.env } as any;
+      if (DB_PASSWORD) env.PGPASSWORD = DB_PASSWORD;
+      const psqlBin = process.env.PSQL_PATH || 'psql';
+      const proc = spawn(psqlBin, args, { env });
+      let responded = false;
+      const fail = (msg: string, err?: any) => {
+        if (responded) return; responded = true;
+        console.error(msg, err || '');
+        res.status(500).json({ ok: false, message: msg, error: typeof err === 'string' ? err : (err?.message || String(err || '')) });
+      };
+      proc.on('error', (e) => fail('Restore failed to start. Ensure psql is installed (or set PSQL_PATH).', e));
       const r = fs.createReadStream(filePath);
+      r.on('error', (e) => fail('Restore failed reading backup file', e));
       r.pipe(proc.stdin);
       let stderr = '';
       let stdout = '';
       proc.stderr.on('data', d => stderr += d.toString());
       proc.stdout.on('data', d => stdout += d.toString());
       proc.on('close', async (code) => {
+        if (responded) return;
         if (code === 0) {
           try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'REPORT', description: `Admin restored DB from ${path.basename(filePath)}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+          responded = true;
           return res.json({ ok: true, message: 'Restore completed' });
         }
         console.error('psql restore failed', stderr);
-        res.status(500).json({ ok: false, message: 'Restore failed', error: stderr.trim() });
+        fail('Restore failed. Ensure psql is installed and in PATH or set PSQL_PATH. Also verify DB env vars/DATABASE_URL.', stderr.trim());
       });
     } catch (e) {
       console.error('Restore error', e);
       res.status(500).json({ message: 'Restore failed' });
+    }
+  });
+
+  // Admin: send direct email to users
+  app.post('/api/admin/email', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const { toUserId, toEmail, subject, html, text } = req.body || {};
+      if (!subject || (!html && !text)) return res.status(400).json({ message: 'subject and html or text are required' });
+      let recipient = String(toEmail || '').trim();
+      if (!recipient && toUserId) {
+        const r = await pool.query('SELECT email FROM users WHERE id = $1', [toUserId]);
+        recipient = r.rows[0]?.email || '';
+      }
+      if (!recipient) return res.status(400).json({ message: 'Recipient email not provided' });
+
+      const SMTP_HOST = process.env.SMTP_HOST;
+      const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587');
+      const SMTP_USER = process.env.SMTP_USER;
+      const SMTP_PASS = process.env.SMTP_PASS;
+      const SMTP_FROM = process.env.SMTP_FROM;
+      let from = SMTP_FROM;
+      try {
+        if (!from) {
+          const s = await pool.query('SELECT email_from FROM app_settings WHERE id = 1');
+          from = s.rows[0]?.email_from || undefined;
+        }
+      } catch {}
+      if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !from) {
+        return res.status(400).json({ message: 'Email not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM or app_settings.email_from.' });
+      }
+  // @ts-ignore - nodemailer types may not be resolvable in this setup; we treat it as any
+  const nodemailer: any = await import('nodemailer');
+  const transporter = nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_PORT === 465,
+        auth: { user: SMTP_USER, pass: SMTP_PASS }
+      } as any);
+      const info = await transporter.sendMail({ from, to: recipient, subject, html, text });
+      try { await logActivity({ userId: req.user!.id, actionType: 'CREATE', resourceType: 'EMAIL', description: `Sent email to ${recipient}: ${subject}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.json({ ok: true, id: info.messageId || null });
+    } catch (e: any) {
+      console.error('Email send failed', e);
+      res.status(500).json({ message: 'Failed to send email', error: e?.message });
     }
   });
 

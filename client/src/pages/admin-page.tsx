@@ -79,6 +79,7 @@ export default function AdminPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [moderationActionLoading, setModerationActionLoading] = useState<number | null>(null);
+  const [tempPasswords, setTempPasswords] = useState<Record<number, string>>({});
 
   // Check if user is admin (legacy) or has admin.access permission
   useEffect(() => {
@@ -160,8 +161,11 @@ export default function AdminPage() {
       if (!response.ok) throw new Error('Failed to reset password');
       return response.json();
     },
-    onSuccess: (data) => {
+    onSuccess: (data: any, userId: number) => {
       toast({ title: 'Password Reset', description: `Temporary password: ${data.temporaryPassword}` });
+      if (userId && data?.temporaryPassword) {
+        setTempPasswords(prev => ({ ...prev, [userId]: data.temporaryPassword }));
+      }
     },
     onError: (e: any) => toast({ title: 'Error', description: e.message, variant: 'destructive' })
   });
@@ -355,7 +359,7 @@ export default function AdminPage() {
       <div className="container max-w-7xl mx-auto px-4 py-8">
         <div className="flex justify-between items-center mb-6">
           <div>
-            <h1 className="text-3xl font-bold">Analytics</h1>
+            <h1 className="text-3xl font-bold">Admin Dashboard</h1>
             <p className="text-gray-600">Manage your ExpenseTrack application</p>
           </div>
           <div className="flex items-center space-x-2">
@@ -408,53 +412,73 @@ export default function AdminPage() {
         </div>
 
         <Tabs value={selectedTab} onValueChange={setSelectedTab} className="space-y-6">
-          <TabsList className="grid grid-cols-10 max-w-6xl">
-            <TabsTrigger value="dashboard">
+          <TabsList className="grid grid-cols-10 max-w-6xl bg-black rounded-xl p-1 text-white">
+            <TabsTrigger 
+              value="dashboard"
+              className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
               <BarChart className="h-4 w-4 mr-2" />
               Analytics
             </TabsTrigger>
             {hasPermission(user, 'user.manage') && (
-              <TabsTrigger value="users">
+              <TabsTrigger 
+                value="users"
+                className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
                 <UserIcon className="h-4 w-4 mr-2" />
                 Users
               </TabsTrigger>
             )}
             {(hasPermission(user, 'expense.read') || hasPermission(user, 'expense.write')) && (
-              <TabsTrigger value="expenses">
+              <TabsTrigger 
+                value="expenses"
+                className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
                 <BarChart className="h-4 w-4 mr-2" />
                 Expenses
               </TabsTrigger>
             )}
             {(hasPermission(user, 'income.read') || hasPermission(user, 'income.write')) && (
-              <TabsTrigger value="incomes">
+              <TabsTrigger 
+                value="incomes"
+                className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
                 <DollarSign className="h-4 w-4 mr-2" />
                 Incomes
               </TabsTrigger>
             )}
             {(hasPermission(user, 'budget.read') || hasPermission(user, 'budget.write')) && (
-              <TabsTrigger value="budgets">
+              <TabsTrigger 
+                value="budgets"
+                className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
                 <PieChart className="h-4 w-4 mr-2" />
                 Budgets
               </TabsTrigger>
             )}
-            <TabsTrigger value="history">
+            <TabsTrigger 
+              value="history"
+              className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
               <History className="h-4 w-4 mr-2" />
               History
             </TabsTrigger>
-            <TabsTrigger value="roles">
+            <TabsTrigger 
+              value="roles"
+              className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
               <ShieldCheck className="h-4 w-4 mr-2" />
               Roles
             </TabsTrigger>
-            <TabsTrigger value="system-settings">
+            <TabsTrigger 
+              value="system-settings"
+              className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
               <Settings className="h-4 w-4 mr-2" />
               System Settings
             </TabsTrigger>
-            <TabsTrigger value="announcements">
+            <TabsTrigger 
+              value="announcements"
+              className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
               <FileText className="h-4 w-4 mr-2" />
               Announcements
             </TabsTrigger>
             {(user?.role === 'admin' || hasPermission(user, 'moderation.manage')) && (
-              <TabsTrigger value="moderation">
+              <TabsTrigger 
+                value="moderation"
+                className="data-[state=active]:bg-white data-[state=active]:text-black text-white hover:bg-white/10 rounded-md">
                 <Flag className="h-4 w-4 mr-2" />
                 Moderation
               </TabsTrigger>
@@ -468,9 +492,9 @@ export default function AdminPage() {
               </div>
             ) : dashboardStats ? (
               <div className="space-y-6">
-                {/* Header title for Analytics Dashboard */}
+                {/* Header title for Admin Dashboard */}
                 <div>
-                  <h2 className="text-2xl font-semibold">Analytics Dashboard</h2>
+                  <h2 className="text-2xl font-semibold">Admin Dashboard</h2>
                   <p className="text-sm text-gray-600">Comprehensive insights into your expense tracking platform</p>
                 </div>
                 {/* Stats Grid to match screenshot (4 cards) */}
@@ -702,34 +726,51 @@ export default function AdminPage() {
                               <span className={`text-xs px-2 py-1 rounded-full ${ (user as any).status === 'active' ? 'bg-green-100 text-green-800' : (user as any).status === 'suspended' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-200 text-gray-700' }`}>
                                 {(user as any).status || 'active'}
                               </span>
+                              {tempPasswords[user.id] && (
+                                <div className="text-[11px] text-gray-700 mt-1">
+                                  Temp password: <span className="font-mono">{tempPasswords[user.id]}</span>
+                                </div>
+                              )}
                             </TableCell>
                             <TableCell className="text-right">
-                              {/* Assign additional roles (RBAC) */}
-                              <AssignRoleButtons userId={user.id} />
-                              {(user as any).status !== 'suspended' && (
-                                <Button variant="ghost" size="sm" title="Suspend" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'suspended' })}>
-                                  <ShieldBan className="h-4 w-4" />
-                                </Button>
-                              )}
-                              {(user as any).status === 'suspended' && (
-                                <Button variant="ghost" size="sm" title="Activate" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'active' })}>
-                                  <ShieldCheck className="h-4 w-4" />
-                                </Button>
-                              )}
-                              <Button variant="ghost" size="sm" title="Reset Password" onClick={() => resetPasswordMutation.mutate(user.id)}>
-                                <KeyRound className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 w-8 p-0 text-red-500"
-                                onClick={() => {
-                                  setSelectedUser(user);
-                                  setIsDeleteDialogOpen(true);
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
+                              <div className="inline-flex gap-4 items-end justify-end">
+                                {(user as any).status !== 'suspended' ? (
+                                  <div className="flex flex-col items-center">
+                                    <Button variant="ghost" size="sm" title="Suspend" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'suspended' })}>
+                                      <ShieldBan className="h-4 w-4" />
+                                    </Button>
+                                    <span className="text-[10px] mt-1">Suspend</span>
+                                  </div>
+                                ) : (
+                                  <div className="flex flex-col items-center">
+                                    <Button variant="ghost" size="sm" title="Activate" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'active' })}>
+                                      <ShieldCheck className="h-4 w-4" />
+                                    </Button>
+                                    <span className="text-[10px] mt-1">Activate</span>
+                                  </div>
+                                )}
+                                <div className="flex flex-col items-center">
+                                  <Button variant="ghost" size="sm" title="Reset Password" onClick={() => resetPasswordMutation.mutate(user.id)}>
+                                    <KeyRound className="h-4 w-4" />
+                                  </Button>
+                                  <span className="text-[10px] mt-1">Reset</span>
+                                </div>
+                                <div className="flex flex-col items-center">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-8 w-8 p-0 text-red-500"
+                                    title="Delete"
+                                    onClick={() => {
+                                      setSelectedUser(user);
+                                      setIsDeleteDialogOpen(true);
+                                    }}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                  <span className="text-[10px] mt-1">Delete</span>
+                                </div>
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))
@@ -1088,37 +1129,7 @@ export default function AdminPage() {
   );
 }
 
-function AssignRoleButtons({ userId }: { userId: number }) {
-  const { data: roles } = useQuery({
-    queryKey: ["/api/admin/roles"],
-    queryFn: async () => {
-      const r = await fetch('/api/admin/roles');
-      if (!r.ok) throw new Error('Failed roles');
-      return r.json();
-    }
-  });
-  const { toast } = useToast();
-
-  const assign = async (roleId: number) => {
-    const resp = await fetch(`/api/admin/users/${userId}/roles`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roleId }) });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      toast({ title: 'Error', description: err.message || 'Failed to assign role', variant: 'destructive' });
-      return;
-    }
-    toast({ title: 'Role assigned' });
-  };
-
-  return (
-    <div className="inline-flex gap-1 mr-2">
-      {roles?.slice(0,3).map((r: any) => (
-        <Button key={r.id} variant="outline" size="sm" onClick={() => assign(r.id)}>
-          {r.name}
-        </Button>
-      ))}
-    </div>
-  );
-}
+// Removed inline quick role assign buttons from Actions per request
 
 // Inline RolesManager component
 function RolesManager() {
