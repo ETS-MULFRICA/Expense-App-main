@@ -217,7 +217,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
                   const isDark = v === 'dark' || (v === 'system' && prefersDark);
                   document.documentElement.classList.toggle('dark', isDark);
                 }}
-                defaultValue={(typeof window!=='undefined' && localStorage.getItem('app:theme-mode')) || 'system'}
+                defaultValue={(typeof window!=='undefined' && localStorage.getItem('app:theme-mode')) || 'light'}
               >
                 <SelectTrigger><SelectValue placeholder='Theme mode' /></SelectTrigger>
                 <SelectContent>

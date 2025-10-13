@@ -18,7 +18,7 @@ export default function SettingsPage() {
   const { toast } = useToast();
   const [currency, setCurrency] = useState(user?.currency || "XAF");
   const [themeMode, setThemeMode] = useState<'system'|'light'|'dark'>(() => {
-    try { return (localStorage.getItem('app:theme-mode') as any) || 'system'; } catch { return 'system'; }
+  try { return (localStorage.getItem('app:theme-mode') as any) || 'light'; } catch { return 'light'; }
   });
 
   const applyTheme = (mode: 'system'|'light'|'dark') => {

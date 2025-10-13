@@ -26,7 +26,7 @@ export default function MobileNav() {
   const [location] = useLocation();
   const { user, logoutMutation } = useAuth();
   const [themeMode, setThemeMode] = useState<'system'|'light'|'dark'>(() => {
-    try { return (localStorage.getItem('app:theme-mode') as any) || 'system'; } catch { return 'system'; }
+  try { return (localStorage.getItem('app:theme-mode') as any) || 'light'; } catch { return 'light'; }
   });
 
   useEffect(() => {

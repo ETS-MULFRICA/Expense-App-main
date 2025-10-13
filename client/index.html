@@ -12,7 +12,7 @@
         var key = 'app:theme-mode';
         var stored = localStorage.getItem(key);
         var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        var mode = stored || 'system';
+  var mode = stored || 'light';
         var isDark = mode === 'dark' || (mode === 'system' && prefersDark);
         var root = document.documentElement;
         if (isDark) {
