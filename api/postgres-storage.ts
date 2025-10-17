@@ -10,7 +10,7 @@ import {
 export class PostgresStorage {
   // Create default categories for a new user
   async createDefaultCategories(userId: number): Promise<void> {
-    // Default expense categories and subcategories
+  // Default expense categories and subcategories
     const expenseCategories = {
       "Children": ["Activities", "Allowance", "Medical", "Childcare", "Clothing", "School", "Toys"],
       "Debt": ["Credit cards", "Student loans", "Other loans", "Taxes (federal)", "Taxes (state)", "Other"],
@@ -34,39 +34,97 @@ export class PostgresStorage {
       "Other": ["Transfer from savings", "Interest income", "Dividends", "Gifts", "Refunds", "Other"]
     };
 
-    // Insert expense categories and subcategories
+    // Ensure core system expense categories exist (global, not per-user)
+    try {
+      const sys = await pool.query('SELECT name FROM expense_categories WHERE is_system = true');
+      const have = new Set<string>(sys.rows.map((r: any) => String(r.name).toLowerCase()));
+      const systemDefaults = ['Food','Transport','Utilities','Health','Entertainment'];
+      for (const name of systemDefaults) {
+        if (!have.has(name.toLowerCase())) {
+          await pool.query(
+            'INSERT INTO expense_categories (user_id, name, description, is_system) VALUES (NULL, $1, $2, TRUE)',
+            [name, `${name} expenses`]
+          );
+        }
+      }
+    } catch {}
+
+    // Fetch existing expense categories for this user to avoid duplicates (idempotent for user-owned)
+    const existingExpCatsRes = await pool.query('SELECT id, name FROM expense_categories WHERE user_id = $1', [userId]);
+    const existingExpCatByName = new Map<string, number>(
+      existingExpCatsRes.rows.map((r: any) => [String(r.name).toLowerCase(), r.id])
+    );
+
+    // Insert missing expense categories and subcategories
     for (const [catName, subcats] of Object.entries(expenseCategories)) {
-      const catRes = await pool.query(
-        'INSERT INTO expense_categories (user_id, name, description) VALUES ($1, $2, $3) RETURNING id',
-        [userId, catName, `${catName} expenses`]
-      );
-      const categoryId = catRes.rows[0].id;
-      for (const subcatName of subcats) {
-        await pool.query(
-          'INSERT INTO expense_subcategories (category_id, user_id, name, description) VALUES ($1, $2, $3, $4)',
-          [categoryId, userId, subcatName, `${subcatName} in ${catName}`]
+      const key = catName.toLowerCase();
+      let categoryId = existingExpCatByName.get(key);
+      if (typeof categoryId !== 'number') {
+        const catRes = await pool.query(
+          'INSERT INTO expense_categories (user_id, name, description) VALUES ($1, $2, $3) RETURNING id',
+          [userId, catName, `${catName} expenses`]
         );
+        categoryId = catRes.rows[0].id;
+  existingExpCatByName.set(key, categoryId as number);
+      }
+
+      // Subcategories: check existing per category
+      const existingSubRes = await pool.query(
+        'SELECT name FROM expense_subcategories WHERE user_id = $1 AND category_id = $2',
+        [userId, categoryId as number]
+      );
+      const existingSubNames = new Set<string>(existingSubRes.rows.map((r: any) => String(r.name).toLowerCase()));
+      for (const subcatName of subcats) {
+        if (!existingSubNames.has(subcatName.toLowerCase())) {
+          await pool.query(
+            'INSERT INTO expense_subcategories (category_id, user_id, name, description) VALUES ($1, $2, $3, $4)',
+            [categoryId, userId, subcatName, `${subcatName} in ${catName}`]
+          );
+        }
       }
     }
 
-    // Insert income categories and subcategories
+    // Income categories: idempotent insert
+    const existingIncCatsRes = await pool.query(
+      'SELECT id, name FROM income_categories WHERE user_id = $1',
+      [userId]
+    );
+    const existingIncCatByName = new Map<string, number>(
+      existingIncCatsRes.rows.map((r: any) => [String(r.name).toLowerCase(), r.id])
+    );
+
     for (const [catName, subcats] of Object.entries(incomeCategories)) {
-      const catRes = await pool.query(
-        'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, $4) RETURNING id',
-        [userId, catName, `${catName} income`, true]
-      );
-      const categoryId = catRes.rows[0].id;
-      console.log('Created income category:', catName, 'for user', userId, 'with id', categoryId);
-      for (const subcatName of subcats) {
-        await pool.query(
-          'INSERT INTO income_subcategories (category_id, user_id, name, description) VALUES ($1, $2, $3, $4)',
-          [categoryId, userId, subcatName, `${subcatName} in ${catName}`]
+      const key = catName.toLowerCase();
+      let categoryId = existingIncCatByName.get(key);
+      if (typeof categoryId !== 'number') {
+        const catRes = await pool.query(
+          'INSERT INTO income_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, $4) RETURNING id',
+          [userId, catName, `${catName} income`, true]
         );
+        categoryId = catRes.rows[0].id;
+  existingIncCatByName.set(key, categoryId as number);
+        console.log('Created income category:', catName, 'for user', userId, 'with id', categoryId);
+      }
+      const existingIncSubs = await pool.query(
+        'SELECT name FROM income_subcategories WHERE user_id = $1 AND category_id = $2',
+        [userId, categoryId as number]
+      );
+      const existingIncSubNames = new Set<string>(existingIncSubs.rows.map((r: any) => String(r.name).toLowerCase()));
+      for (const subcatName of subcats) {
+        if (!existingIncSubNames.has(subcatName.toLowerCase())) {
+          await pool.query(
+            'INSERT INTO income_subcategories (category_id, user_id, name, description) VALUES ($1, $2, $3, $4)',
+            [categoryId, userId, subcatName, `${subcatName} in ${catName}`]
+          );
+        }
       }
     }
-    // Debug log: show all income categories for user
-    const allCats = await pool.query('SELECT * FROM income_categories WHERE user_id = $1', [userId]);
-    console.log('All income categories for user', userId, allCats.rows);
+    // Optional debug: show summary counts
+    try {
+      const expCount = await pool.query('SELECT COUNT(*)::int AS c FROM expense_categories WHERE user_id = $1', [userId]);
+      const incCount = await pool.query('SELECT COUNT(*)::int AS c FROM income_categories WHERE user_id = $1', [userId]);
+      console.log('Seeding complete for user', userId, 'expenseCats:', expCount.rows[0]?.c, 'incomeCats:', incCount.rows[0]?.c);
+    } catch {}
   }
   sessionStore: session.Store;
 
@@ -314,7 +372,15 @@ export class PostgresStorage {
 
   async getExpenseCategoryById(id: number): Promise<any> {
     const result = await pool.query('SELECT * FROM expense_categories WHERE id = $1', [id]);
-    return result.rows[0];
+    const row = result.rows[0];
+    if (!row) return undefined;
+    // normalize field names for callers using camelCase
+    return {
+      ...row,
+      userId: row.user_id,
+      isSystem: row.is_system,
+      createdAt: row.created_at
+    };
   }
 
   async createExpenseCategory(userId: number, category: InsertExpenseCategory): Promise<ExpenseCategory> {

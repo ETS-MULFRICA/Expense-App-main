@@ -250,6 +250,51 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // --- Backups (Admin) ---
+  // Admin: seed default categories for users (idempotent)
+  app.post('/api/admin/seed-categories', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      const { userId, username } = req.body || {};
+      let users: any[];
+
+      if (userId != null || (username && String(username).trim())) {
+        let target: any = null;
+        if (username && String(username).trim()) {
+          // Case-insensitive username lookup
+          const u = String(username).trim();
+          const r = await pool.query('SELECT * FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1', [u]);
+          target = r.rows[0] || null;
+        } else if (userId != null) {
+          const idNum = Number(userId);
+          if (Number.isFinite(idNum)) {
+            target = await storage.getUser(idNum);
+          }
+        }
+        if (!target) return res.status(404).json({ message: 'User not found' });
+        users = [target];
+      } else {
+        users = await storage.getAllUsers();
+      }
+
+      const details: Array<{ id: number; username: string; processed: boolean; error?: string }>= [];
+      let processed = 0;
+      for (const u of users) {
+        try {
+          await storage.createDefaultCategories(u.id);
+          processed++;
+          details.push({ id: u.id, username: u.username, processed: true });
+        } catch (e: any) {
+          console.warn('Seeding categories failed for user', u?.id, e);
+          details.push({ id: u.id, username: u.username, processed: false, error: e?.message || String(e) });
+        }
+      }
+      try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'SETTINGS', description: `Admin seeded categories for ${processed} user(s)`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      res.json({ ok: true, processed, details });
+    } catch (e) {
+      console.error('Seed categories error', e);
+      res.status(500).json({ message: 'Failed to seed categories' });
+    }
+  });
+
   app.post('/api/admin/backup', requireAuth, requirePermission('admin.access'), async (req, res) => {
     try {
       // Parse DB connection from env (supports DATABASE_URL)
@@ -934,9 +979,10 @@ app.post("/api/user-income-categories", requireAuth, async (req, res) => {
    */
   app.get("/api/expense-categories", requireAuth, async (req, res) => {
     try {
-      // Check if table is empty and populate with defaults if needed
-      const countResult = await pool.query('SELECT COUNT(*) FROM expense_categories WHERE user_id = $1', [req.user!.id]);
-      if (parseInt(countResult.rows[0].count) === 0) {
+      const systemNames = ['Food','Transport','Utilities','Health','Entertainment'];
+      // Ensure global system categories exist only once (avoid duplicate unique errors)
+      const sysCount = await pool.query('SELECT COUNT(*)::int AS c FROM expense_categories WHERE is_system = true');
+      if ((sysCount.rows[0]?.c ?? 0) === 0) {
         const defaultCategories = [
           { name: 'Food', description: 'Groceries, restaurants, snacks' },
           { name: 'Transport', description: 'Bus, taxi, fuel, car maintenance' },
@@ -945,19 +991,38 @@ app.post("/api/user-income-categories", requireAuth, async (req, res) => {
           { name: 'Entertainment', description: 'Movies, events, subscriptions' }
         ];
         for (const cat of defaultCategories) {
-          await pool.query(
-            'INSERT INTO expense_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, $4)',
-            [req.user!.id, cat.name, cat.description, true]
-          );
+          try {
+            await pool.query(
+              'INSERT INTO expense_categories (user_id, name, description, is_system) VALUES ($1, $2, $3, TRUE)',
+              [req.user!.id, cat.name, cat.description]
+            );
+          } catch (e: any) {
+            // If another request created them concurrently, ignore unique violation
+            if (e?.code !== '23505') throw e;
+          }
         }
       }
-      // Fetch all system categories and all user-created categories
-      const categoriesResult = await pool.query(
-        'SELECT * FROM expense_categories WHERE is_system = true OR user_id = $1',
-        [req.user!.id]
+      // Fetch allowed system categories and all user-created categories for this user
+      let categoriesResult = await pool.query(
+        `SELECT * FROM expense_categories 
+         WHERE (is_system = TRUE AND LOWER(name) = ANY($2))
+            OR user_id = $1`,
+        [req.user!.id, systemNames.map(n => n.toLowerCase())]
       );
-  console.log("[DEBUG] /api/expense-categories for userId:", req.user!.id, "categories:", categoriesResult.rows);
-  res.json(categoriesResult.rows);
+      // If none visible for this user, seed user defaults once (idempotent) and refetch
+      if ((categoriesResult.rowCount ?? 0) === 0) {
+        try {
+          await storage.createDefaultCategories(req.user!.id);
+          categoriesResult = await pool.query(
+            'SELECT * FROM expense_categories WHERE is_system = true OR user_id = $1',
+            [req.user!.id]
+          );
+        } catch (e) {
+          console.warn('Fallback seeding failed for user', req.user!.id, e);
+        }
+      }
+      console.log("[DEBUG] /api/expense-categories for userId:", req.user!.id, "count:", categoriesResult.rowCount);
+      res.json(categoriesResult.rows);
     } catch (error) {
       console.error("Error fetching expense categories:", error);
       res.status(500).json({ message: "Failed to fetch expense categories" });
@@ -1193,28 +1258,21 @@ app.post("/api/user-income-categories", requireAuth, async (req, res) => {
   app.get("/api/income-categories", requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
-      // Fetch the three default categories
-      const defaultCategoriesResult = await pool.query(
-        'SELECT id, name FROM income_categories WHERE name IN (\'Wages\', \'Other\', \'Deals\') ORDER BY name'
+      // Fetch combined system + user categories
+      let userCategoriesResult = await pool.query(
+        'SELECT * FROM income_categories WHERE user_id = $1 ORDER BY name', [userId]
       );
-      const defaultCategories = defaultCategoriesResult.rows.map(row => ({
-        id: row.id,
-        name: row.name,
-        isDefault: true
-      }));
-
-      // Fetch user-specific categories
-      const userCategoriesResult = await pool.query(
-        'SELECT * FROM income_categories WHERE user_id = $1 OR is_system = true', [userId]
-      );
-      const userCategories = userCategoriesResult.rows.map(row => ({
-        id: row.id,
-        name: row.name,
-        isDefault: false
-      }));
-
-      // Combine and return
-      res.json([...defaultCategories, ...userCategories]);
+      // If nothing visible, seed user defaults idempotently and refetch
+      if ((userCategoriesResult.rowCount ?? 0) === 0) {
+        try {
+          await storage.createDefaultCategories(userId);
+          userCategoriesResult = await pool.query('SELECT * FROM income_categories WHERE user_id = $1 ORDER BY name', [userId]);
+        } catch (e) {
+          console.warn('Fallback income seeding failed for user', userId, e);
+        }
+      }
+      const result = userCategoriesResult.rows.map(row => ({ id: row.id, name: row.name, isDefault: !!row.is_system }));
+      res.json(result);
     } catch (error) {
       console.error("Error fetching income categories:", error);
       res.status(500).json({ message: "Failed to fetch income categories" });
@@ -2035,9 +2093,9 @@ app.post("/api/budgets", requireAuth, async (req, res) => {
       data.endDate = new Date(data.endDate);
     }
     
-    // Extract categoryIds before validation
-    const categoryIds = data.categoryIds;
-    delete data.categoryIds;
+  // Extract optional allocations with amounts; ignore legacy categoryIds placeholders
+  const incomingAllocations = Array.isArray(data.allocations) ? data.allocations : [];
+  delete data.categoryIds; // deprecated: creating 0-amount placeholders violates DB constraint
     
     const budgetData = insertBudgetSchema.parse(data);
     const budget = await storage.createBudget({
@@ -2045,22 +2103,17 @@ app.post("/api/budgets", requireAuth, async (req, res) => {
       userId: req.user!.id
     });
     
-    // If categories are provided, create budget allocations for them
-    if (categoryIds && Array.isArray(categoryIds) && categoryIds.length > 0) {
+    // If allocations are provided with positive amounts, create them now
+    if (incomingAllocations.length > 0) {
       const budgetId = budget.id;
-      
-      // Verify all categories belong to the user
-      for (const categoryId of categoryIds) {
+      for (const a of incomingAllocations) {
+        const categoryId = Number(a.categoryId);
+        const amount = Number(a.amount);
+        const subcategoryId = a.subcategoryId ? Number(a.subcategoryId) : null;
+        if (!Number.isFinite(categoryId) || !Number.isFinite(amount) || amount <= 0) continue;
         const category = await storage.getExpenseCategoryById(categoryId);
-        if (category && category.userId === req.user!.id) {
-          // Create an initial allocation with zero amount that can be updated later
-          await storage.createBudgetAllocation({
-            budgetId,
-            categoryId,
-            subcategoryId: null,
-            amount: 0
-          });
-        }
+        if (!category || category.userId !== req.user!.id) continue;
+        await storage.createBudgetAllocation({ budgetId, categoryId, subcategoryId, amount });
       }
     }
     
@@ -2090,7 +2143,9 @@ app.post("/api/budgets", requireAuth, async (req, res) => {
     
     res.status(201).json(budget);
   } catch (error) {
-    if (error instanceof ZodError) {
+    if ((error as any)?.code === '23514') {
+      return res.status(400).json({ message: 'Allocation amount must be greater than zero' });
+    } else if (error instanceof ZodError) {
       const validationError = fromZodError(error);
       res.status(400).json({ message: validationError.message });
     } else {

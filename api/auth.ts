@@ -149,6 +149,14 @@ export function setupAuth(app: Express) {
     const user = insertResult.rows[0];
     console.log("Created new user:", user);
 
+    // Seed default categories for the new user to ensure categories work immediately
+    try {
+      await storage.createDefaultCategories(user.id);
+    } catch (e) {
+      console.warn('Failed to seed default categories for new user', e);
+      // Do not block registration if seeding fails
+    }
+
     // Log the user in
     req.login(user, (err) => {
       if (err) return next(err);

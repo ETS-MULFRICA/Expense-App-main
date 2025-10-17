@@ -32,6 +32,12 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
   const [security, setSecurity] = useState<any>({ require2FA: false, passwordMinLength: 8 });
   // For change tracking
   const [initial, setInitial] = useState<any | null>(null);
+  // Maintenance: seed categories
+  const [seedUserId, setSeedUserId] = useState<string>('');
+  const [seedUsername, setSeedUsername] = useState<string>('');
+  const [seeding, setSeeding] = useState(false);
+  const [seedProcessed, setSeedProcessed] = useState<number | null>(null);
+  const [seedDetails, setSeedDetails] = useState<any[] | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -88,6 +94,40 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     const saved = await resp.json();
     setInitial(saved);
     toast({ title: 'Settings saved' });
+  };
+
+  const seedCategories = async () => {
+    setSeeding(true);
+    setSeedProcessed(null);
+    try {
+      const payload: any = {};
+      const id = seedUserId.trim();
+      const uname = seedUsername.trim();
+      if (uname) {
+        payload.username = uname;
+      } else if (id) {
+        const n = Number(id);
+        if (!Number.isFinite(n) || n <= 0) {
+          toast({ title: 'Invalid user ID', variant: 'destructive' });
+          setSeeding(false);
+          return;
+        }
+        payload.userId = n;
+      }
+      const r = await fetch('/api/admin/seed-categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(data?.message || 'Seeding failed');
+      setSeedProcessed(data?.processed ?? 0);
+      toast({ title: 'Seeding complete', description: `${data?.processed ?? 0} user(s) processed` });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message || 'Failed to seed categories', variant: 'destructive' });
+    } finally {
+      setSeeding(false);
+    }
   };
 
   // Compute modified status consistently on every render (do not place hooks after returns)
@@ -291,6 +331,41 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
                 <Switch checked={!!features[item.key]} onCheckedChange={(v)=>setFeatures((f:any)=>({ ...f, [item.key]: !!v }))} />
               </div>
             ))}
+          </Section>
+          <Section title='Maintenance' badge={undefined}>
+            <div className='space-y-3'>
+              <p className='text-sm text-gray-600'>Seed default categories. Provide a username or a user ID. Leave both empty to seed for all users. Safe to run multiple times.</p>
+              <div className='grid grid-cols-1 md:grid-cols-3 gap-3 items-end'>
+                <div>
+                  <Label>Username (optional)</Label>
+                  <Input placeholder='e.g., johndoe' value={seedUsername} onChange={e=>setSeedUsername(e.target.value)} />
+                </div>
+                <div>
+                  <Label>User ID (optional)</Label>
+                  <Input placeholder='e.g., 42' value={seedUserId} onChange={e=>setSeedUserId(e.target.value)} />
+                </div>
+                <div className='text-right'>
+                  <Button onClick={seedCategories} disabled={seeding}>{seeding ? 'Seeding…' : 'Seed Default Categories'}</Button>
+                </div>
+              </div>
+              {seedProcessed !== null && (
+                <div className='space-y-1'>
+                  <p className='text-xs text-gray-500'>Processed {seedProcessed} user(s).</p>
+                  {Array.isArray(seedDetails) && seedDetails.length > 0 && (
+                    <div className='rounded border p-2 bg-gray-50 text-xs text-gray-700'>
+                      {seedDetails.map((d, i) => (
+                        <div key={i} className='flex items-center justify-between py-0.5'>
+                          <span>#{d.id} {d.username}</span>
+                          <span className={d.processed ? 'text-green-600' : 'text-red-600'}>
+                            {d.processed ? 'ok' : (d.error || 'error')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </Section>
         </TabsContent>
       </Tabs>
