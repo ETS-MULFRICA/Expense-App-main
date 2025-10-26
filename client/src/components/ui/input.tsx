@@ -6,7 +6,7 @@ export interface InputProps
   extends React.InputHTMLAttributes<HTMLInputElement> {}
 
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, type, ...props }, ref) => {
+  ({ className, type, onKeyDown, onKeyUp, ...props }, ref) => {
     return (
       <input
         type={type}
@@ -15,6 +15,8 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
           className
         )}
         ref={ref}
+        onKeyDown={(e) => { e.stopPropagation(); onKeyDown?.(e); }}
+        onKeyUp={(e) => { e.stopPropagation(); onKeyUp?.(e); }}
         {...props}
       />
     )

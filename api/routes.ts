@@ -147,6 +147,54 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin: verify email providers and SMTP connectivity (no caching, no email sent)
+  app.get('/api/admin/email/verify', requireAuth, requirePermission('admin.access'), async (req, res) => {
+    try {
+      // No cache
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      const SMTP_HOST = process.env.SMTP_HOST;
+      const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587');
+      const SMTP_USER = process.env.SMTP_USER;
+      const SMTP_PASS = process.env.SMTP_PASS;
+      const SMTP_FROM = process.env.SMTP_FROM;
+      const RESEND_API_KEY = process.env.RESEND_API_KEY;
+      const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+
+      let from = SMTP_FROM;
+      try {
+        if (!from) {
+          const s = await pool.query('SELECT email_from FROM app_settings WHERE id = 1');
+          from = s.rows[0]?.email_from || undefined;
+        }
+      } catch {}
+      if (!from && SMTP_USER && /@/.test(SMTP_USER)) from = `Expense App <${SMTP_USER}>`;
+
+      // @ts-ignore
+      const nodemailer: any = await import('nodemailer');
+      const providers: any = {
+        smtp: {
+          configured: !!(SMTP_HOST && SMTP_USER && SMTP_PASS),
+          host: SMTP_HOST || null,
+          port: SMTP_PORT || null,
+          from: from || null,
+          missing: [!SMTP_HOST ? 'SMTP_HOST' : null, !SMTP_USER ? 'SMTP_USER' : null, !SMTP_PASS ? 'SMTP_PASS' : null].filter(Boolean)
+        },
+        resend: { configured: !!RESEND_API_KEY, missing: !RESEND_API_KEY ? ['RESEND_API_KEY'] : [] },
+        sendgrid: { configured: !!SENDGRID_API_KEY, missing: !SENDGRID_API_KEY ? ['SENDGRID_API_KEY'] : [] },
+      };
+      if (providers.smtp.configured) {
+        const transporter = nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_PORT === 465, auth: { user: SMTP_USER, pass: SMTP_PASS } } as any);
+        try { providers.smtp.verified = !!(await transporter.verify()); } catch (e: any) { providers.smtp.verified = false; providers.smtp.error = e?.message || String(e); }
+      }
+      return res.json({ ok: true, providers });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, message: e?.message || 'Verification failed' });
+    }
+  });
+
   // Unread count for current user
   app.get('/api/announcements/unread-count', requireAuth, async (req, res) => {
     try {
@@ -246,6 +294,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (e) {
       console.error('Capabilities fetch failed', e);
       res.status(500).json({ message: 'Failed to fetch capabilities' });
+    }
+  });
+
+  // Public app settings (read-only): expose branding and minimal safe fields
+  // Used by all clients (including non-admin) to render global branding consistently
+  app.get('/api/settings', async (_req, res) => {
+    try {
+      const r = await pool.query(
+        'SELECT site_name, logo_data_url FROM app_settings WHERE id = 1'
+      );
+      // Prevent caching so changes reflect immediately across all clients
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.json(r.rows[0] || {});
+    } catch (e) {
+      console.error('Public settings fetch failed', e);
+      res.status(500).json({ message: 'Failed to fetch settings' });
     }
   });
 
@@ -482,6 +548,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/admin/email', requireAuth, requirePermission('admin.access'), async (req, res) => {
     try {
       const { toUserId, toEmail, subject, html, text } = req.body || {};
+      const mode = String((req.body?.mode || 'auto')).toLowerCase(); // 'auto' | 'real' | 'preview'
+      const providerReq = String((req.body?.provider || 'auto')).toLowerCase(); // 'auto'|'smtp'|'resend'|'sendgrid'
       if (!subject || (!html && !text)) return res.status(400).json({ message: 'subject and html or text are required' });
       let recipient = String(toEmail || '').trim();
       if (!recipient && toUserId) {
@@ -502,20 +570,121 @@ export async function registerRoutes(app: Express): Promise<Server> {
           from = s.rows[0]?.email_from || undefined;
         }
       } catch {}
-      if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !from) {
-        return res.status(400).json({ message: 'Email not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM or app_settings.email_from.' });
+      // Fallback From: if SMTP creds exist but no explicit From provided, use SMTP_USER
+      if (!from && SMTP_USER && /@/.test(SMTP_USER)) {
+        from = `Expense App <${SMTP_USER}>`;
       }
-  // @ts-ignore - nodemailer types may not be resolvable in this setup; we treat it as any
-  const nodemailer: any = await import('nodemailer');
-  const transporter = nodemailer.createTransport({
-        host: SMTP_HOST,
-        port: SMTP_PORT,
-        secure: SMTP_PORT === 465,
-        auth: { user: SMTP_USER, pass: SMTP_PASS }
-      } as any);
-      const info = await transporter.sendMail({ from, to: recipient, subject, html, text });
-      try { await logActivity({ userId: req.user!.id, actionType: 'CREATE', resourceType: 'EMAIL', description: `Sent email to ${recipient}: ${subject}`, ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
-      res.json({ ok: true, id: info.messageId || null });
+
+      // Providers env
+      const RESEND_API_KEY = process.env.RESEND_API_KEY;
+      const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+
+      // @ts-ignore - nodemailer types may not be resolvable in this setup; we treat it as any
+      const nodemailer: any = await import('nodemailer');
+      let usedEthereal = false;
+      let providerUsed: 'smtp'|'resend'|'sendgrid'|'ethereal'|null = null;
+
+  const sendViaSMTP = async () => {
+        const transporter = nodemailer.createTransport({
+          host: SMTP_HOST,
+          port: SMTP_PORT,
+          secure: SMTP_PORT === 465,
+          auth: { user: SMTP_USER, pass: SMTP_PASS }
+        } as any);
+        const info = await transporter.sendMail({ from, to: recipient, subject, html, text });
+        const out: any = { ok: true, id: info?.messageId || null, provider: 'smtp', mode: 'real' };
+        return out;
+  };
+
+  const splitFrom = (fromStr: string | undefined) => {
+        if (!fromStr) return { email: '', name: '' };
+        const m = fromStr.match(/^(.*)<([^>]+)>$/);
+        if (m) return { name: m[1].trim().replace(/^"|"$/g,''), email: m[2].trim() };
+        return { name: '', email: fromStr.trim() };
+  };
+
+  const sendViaResend = async () => {
+        const { email: fromEmail, name } = splitFrom(from);
+        const payload: any = { from: fromEmail || from, to: recipient, subject };
+        if (html) payload.html = html; else payload.text = text;
+        const resp = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!resp.ok) {
+          const err = await resp.text();
+          throw new Error(`Resend error ${resp.status}: ${err}`);
+        }
+        const j: any = await resp.json();
+        return { ok: true, id: j?.id || null, provider: 'resend', mode: 'real' };
+  };
+
+  const sendViaSendGrid = async () => {
+        const { email: fromEmail, name } = splitFrom(from);
+        const contentType = html ? 'text/html' : 'text/plain';
+        const contentVal = html || text || '';
+        const payload: any = {
+          personalizations: [{ to: [{ email: recipient }] }],
+          from: fromEmail ? { email: fromEmail, name: name || undefined } : { email: from as string },
+          subject,
+          content: [{ type: contentType, value: contentVal }]
+        };
+        const resp = await fetch('https://api.sendgrid.com/v3/mail/send', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!resp.ok) {
+          const err = await resp.text();
+          throw new Error(`SendGrid error ${resp.status}: ${err}`);
+        }
+        // SendGrid returns 202 with no body
+        return { ok: true, id: null, provider: 'sendgrid', mode: 'real' };
+  };
+
+      let result: any = null;
+      const hasSmtp = !!(SMTP_HOST && SMTP_USER && SMTP_PASS && from);
+      const hasResend = !!RESEND_API_KEY;
+      const hasSendGrid = !!SENDGRID_API_KEY;
+
+      if (mode === 'preview') {
+        const testAccount = await nodemailer.createTestAccount();
+        const transporter = nodemailer.createTransport({ host: 'smtp.ethereal.email', port: 587, secure: false, auth: { user: testAccount.user, pass: testAccount.pass } } as any);
+        if (!from) from = `Expense App <${testAccount.user}>`;
+        const info = await transporter.sendMail({ from, to: recipient, subject, html, text });
+        result = { ok: true, id: info?.messageId || null, provider: 'ethereal', mode: 'preview', previewUrl: nodemailer.getTestMessageUrl(info) || null };
+      } else {
+        // real or auto
+        const provider = providerReq;
+        if (provider === 'smtp') {
+          if (!hasSmtp) return res.status(400).json({ message: 'SMTP not configured for real delivery.' });
+          result = await sendViaSMTP();
+        } else if (provider === 'resend') {
+          if (!hasResend) return res.status(400).json({ message: 'RESEND_API_KEY not configured.' });
+          result = await sendViaResend();
+        } else if (provider === 'sendgrid') {
+          if (!hasSendGrid) return res.status(400).json({ message: 'SENDGRID_API_KEY not configured.' });
+          result = await sendViaSendGrid();
+        } else {
+          // auto priority: SMTP → Resend → SendGrid → (fallback preview in dev)
+          if (hasSmtp) result = await sendViaSMTP();
+          else if (hasResend) result = await sendViaResend();
+          else if (hasSendGrid) result = await sendViaSendGrid();
+          else if (process.env.NODE_ENV !== 'production') {
+            const testAccount = await nodemailer.createTestAccount();
+            const transporter = nodemailer.createTransport({ host: 'smtp.ethereal.email', port: 587, secure: false, auth: { user: testAccount.user, pass: testAccount.pass } } as any);
+            if (!from) from = `Expense App <${testAccount.user}>`;
+            const info = await transporter.sendMail({ from, to: recipient, subject, html, text });
+            result = { ok: true, id: info?.messageId || null, provider: 'ethereal', mode: 'preview', previewUrl: nodemailer.getTestMessageUrl(info) || null };
+          } else {
+            return res.status(400).json({ message: 'Email not configured for real delivery. Set SMTP_* envs or RESEND_API_KEY or SENDGRID_API_KEY.' });
+          }
+        }
+      }
+
+      try { await logActivity({ userId: req.user!.id, actionType: 'CREATE', resourceType: 'EMAIL', description: `Sent email to ${recipient}: ${subject}` , ipAddress: req.ip, userAgent: req.get('User-Agent') }); } catch {}
+      return res.json(result);
     } catch (e: any) {
       console.error('Email send failed', e);
       res.status(500).json({ message: 'Failed to send email', error: e?.message });
@@ -530,6 +699,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let limit = parseInt(rawLimit ?? '50');
     let offset = parseInt(rawOffset ?? '0');
       if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+      const RESEND_API_KEY = process.env.RESEND_API_KEY;
+      const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
       if (limit > 500) limit = 500;
     if (!Number.isFinite(offset) || offset < 0) offset = 0;
     const r = await pool.query('SELECT * FROM login_attempts ORDER BY created_at DESC LIMIT $1 OFFSET $2', [limit, offset]);
@@ -2133,7 +2304,7 @@ app.post("/api/budgets", requireAuth, async (req, res) => {
           period: budget.period,
           startDate: budget.startDate,
           endDate: budget.endDate,
-          categoryCount: categoryIds?.length || 0
+          categoryCount: incomingAllocations?.length || 0
         }
       });
       console.log('[DEBUG] Activity logged for budget creation');

@@ -220,8 +220,14 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
         <TabsContent value='site' className='space-y-4 mt-4'>
           <Section title='Site Information' badge={modified ? 'Modified' : undefined}>
             <div>
-              <Label>Site Name</Label>
-              <Input value={siteName} onChange={e => setSiteName(e.target.value)} />
+              <Label htmlFor='siteName'>Site Name</Label>
+              <Input
+                id='siteName'
+                value={siteName}
+                onChange={e => setSiteName(e.target.value)}
+                onKeyDown={(e) => { e.stopPropagation(); }}
+                onKeyUp={(e) => { e.stopPropagation(); }}
+              />
             </div>
             <div>
               <Label>Logo</Label>
@@ -382,6 +388,19 @@ function DirectEmailPanel() {
   const [subject, setSubject] = useState<string>('');
   const [body, setBody] = useState<string>('');
   const [sending, setSending] = useState(false);
+  const [sendMode, setSendMode] = useState<'auto'|'real'|'preview'>('auto');
+  const [sendProvider, setSendProvider] = useState<'auto'|'smtp'|'resend'|'sendgrid'>('auto');
+  const [providers, setProviders] = useState<any>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/admin/email/verify');
+        const j = await r.json();
+        setProviders(j?.providers || null);
+      } catch {}
+    })();
+  }, []);
 
   const sendEmail = async () => {
     if (!subject.trim() || !body.trim()) { toast({ title: 'Subject and message required', variant: 'destructive' }); return; }
@@ -395,14 +414,21 @@ function DirectEmailPanel() {
           toEmail: toEmail || undefined,
           subject: subject.trim(),
           html: body.includes('<') ? body : undefined,
-          text: body.includes('<') ? undefined : body
+          text: body.includes('<') ? undefined : body,
+          mode: sendMode,
+          provider: sendProvider
         })
       });
+      const data = await r.json().catch(()=>({}));
       if (!r.ok) {
-        const e = await r.json().catch(()=>({}));
-        throw new Error(e?.message || 'Failed to send');
+        throw new Error(data?.message || 'Failed to send');
       }
-      toast({ title: 'Email sent' });
+      if (data?.previewUrl) {
+        toast({ title: 'Email sent (preview)', description: `Open preview in new tab.`, });
+        try { window.open(data.previewUrl, '_blank'); } catch {}
+      } else {
+        toast({ title: 'Email sent' });
+      }
       setToUserId(''); setToEmail(''); setSubject(''); setBody('');
     } catch (e: any) {
       toast({ title: 'Error', description: e.message, variant: 'destructive' });
@@ -423,6 +449,36 @@ function DirectEmailPanel() {
           <Input value={toEmail} onChange={e=>setToEmail(e.target.value)} placeholder="user@example.com" />
         </div>
       </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <Label>Send mode</Label>
+          <select className="border rounded px-2 py-1 w-full" value={sendMode} onChange={e=>setSendMode(e.target.value as any)}>
+            <option value="auto">Auto</option>
+            <option value="real">Real (SMTP/Provider)</option>
+            <option value="preview">Preview (no delivery)</option>
+          </select>
+        </div>
+        <div>
+          <Label>Provider</Label>
+          <select className="border rounded px-2 py-1 w-full" value={sendProvider} onChange={e=>setSendProvider(e.target.value as any)}>
+            <option value="auto">Auto</option>
+            <option value="smtp">SMTP</option>
+            <option value="resend">Resend</option>
+            <option value="sendgrid">SendGrid</option>
+          </select>
+        </div>
+      </div>
+      {providers && (
+        <div className="text-xs text-gray-600 border rounded p-2 bg-gray-50">
+          <div className="font-semibold mb-1">Detected Providers</div>
+          <div>SMTP: {providers.smtp?.configured ? (providers.smtp?.verified ? 'configured ✓' : 'configured (verify failed)') : 'not configured'}</div>
+          <div>Resend: {providers.resend?.configured ? 'configured ✓' : 'not configured'}</div>
+          <div>SendGrid: {providers.sendgrid?.configured ? 'configured ✓' : 'not configured'}</div>
+          {providers.smtp?.configured && providers.smtp?.from && (
+            <div>From: {providers.smtp.from}</div>
+          )}
+        </div>
+      )}
       <div>
         <Label>Subject</Label>
         <Input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="Subject" />

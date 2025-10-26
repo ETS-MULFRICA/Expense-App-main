@@ -30,7 +30,7 @@ export default function Sidebar() {
   });
 
   useEffect(() => {
-    fetch('/api/admin/settings').then(r => r.ok ? r.json() : null).then(s => {
+    fetch('/api/settings').then(r => r.ok ? r.json() : null).then(s => {
       if (s) {
         if (s.site_name) setSiteName(s.site_name);
         if (s.logo_data_url) setLogoUrl(s.logo_data_url);

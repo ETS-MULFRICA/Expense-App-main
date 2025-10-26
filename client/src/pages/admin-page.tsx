@@ -818,23 +818,61 @@ export default function AdminPage() {
                             </TableCell>
                             <TableCell className="text-right">
                               <div className="inline-flex gap-4 items-end justify-end">
-                                {(user as any).status !== 'suspended' ? (
-                                  <div className="flex flex-col items-center">
-                                    <Button variant="ghost" size="sm" title="Suspend" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'suspended' })}>
-                                      <ShieldBan className="h-4 w-4" />
-                                    </Button>
-                                    <span className="text-[10px] mt-1">Suspend</span>
-                                  </div>
-                                ) : (
-                                  <div className="flex flex-col items-center">
-                                    <Button variant="ghost" size="sm" title="Activate" onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'active' })}>
-                                      <ShieldCheck className="h-4 w-4" />
-                                    </Button>
-                                    <span className="text-[10px] mt-1">Activate</span>
-                                  </div>
-                                )}
+                                {(() => {
+                                  const status = (user as any).status;
+                                  if (status === 'active') {
+                                    return (
+                                      <div className="flex flex-col items-center">
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          title="Suspend"
+                                          onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'suspended' })}
+                                        >
+                                          <ShieldBan className="h-4 w-4" />
+                                        </Button>
+                                        <span className="text-[10px] mt-1">Suspend</span>
+                                      </div>
+                                    );
+                                  }
+                                  if (status === 'suspended' || status === 'deleted') {
+                                    return (
+                                      <div className="flex flex-col items-center">
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          title="Activate"
+                                          onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'active' })}
+                                        >
+                                          <ShieldCheck className="h-4 w-4" />
+                                        </Button>
+                                        <span className="text-[10px] mt-1">Activate</span>
+                                      </div>
+                                    );
+                                  }
+                                  // Fallback (unknown status): show Activate
+                                  return (
+                                    <div className="flex flex-col items-center">
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        title="Activate"
+                                        onClick={() => updateStatusMutation.mutate({ userId: user.id, status: 'active' })}
+                                      >
+                                        <ShieldCheck className="h-4 w-4" />
+                                      </Button>
+                                      <span className="text-[10px] mt-1">Activate</span>
+                                    </div>
+                                  );
+                                })()}
                                 <div className="flex flex-col items-center">
-                                  <Button variant="ghost" size="sm" title="Reset Password" onClick={() => resetPasswordMutation.mutate(user.id)}>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    title={(user as any).status === 'deleted' ? 'Activate user to reset password' : 'Reset Password'}
+                                    onClick={() => resetPasswordMutation.mutate(user.id)}
+                                    disabled={(user as any).status === 'deleted'}
+                                  >
                                     <KeyRound className="h-4 w-4" />
                                   </Button>
                                   <span className="text-[10px] mt-1">Reset</span>
