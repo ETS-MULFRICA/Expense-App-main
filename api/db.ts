@@ -10,13 +10,34 @@ const __dirname = dirname(__filename);
 
 
 
-export const config = {
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_NAME,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 5432,
+// Support DATABASE_URL or discrete envs; enable SSL for managed DBs when DB_SSL=true
+let parsedFromUrl: any = null;
+try {
+  const url = process.env.DATABASE_URL;
+  if (url) {
+    const u = new URL(url);
+    parsedFromUrl = {
+      user: decodeURIComponent(u.username),
+      host: u.hostname,
+      database: u.pathname.replace(/^\//, ''),
+      password: decodeURIComponent(u.password),
+      port: u.port ? parseInt(u.port) : 5432,
+    };
+  }
+} catch {}
+
+const wantSSL = String(process.env.DB_SSL || '').toLowerCase() === 'true';
+
+export const config: any = {
+  user: parsedFromUrl?.user || process.env.DB_USER,
+  host: parsedFromUrl?.host || process.env.DB_HOST,
+  database: parsedFromUrl?.database || process.env.DB_NAME,
+  password: parsedFromUrl?.password || process.env.DB_PASSWORD,
+  port: parsedFromUrl?.port || (process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 5432),
 };
+if (wantSSL) {
+  config.ssl = { rejectUnauthorized: false };
+}
 
 export const pool = new Pool(config);
 
