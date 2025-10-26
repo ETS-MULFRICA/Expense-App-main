@@ -81,6 +81,8 @@ app.use((req, res, next) => {
  * - Configures development/production serving
  * - Starts server on port 5000
  */
+const isServerless = !!process.env.VERCEL || !!process.env.NOW;
+
 (async () => {
   // Register all API routes and get HTTP server instance
   const server = await registerRoutes(app);
@@ -117,13 +119,15 @@ app.use((req, res, next) => {
    * - Uses 0.0.0.0 to accept connections from any IP
    * - Enables port reuse for development restarts
    */
-  const port = 5001;
-  server.listen({
-    port,
-    host: "0.0.0.0",
-  }, () => {
-    log(`serving on port ${port}`);
-    runMigrationScript();
-  });
+  if (!isServerless) {
+    const port = 5001;
+    server.listen({
+      port,
+      host: "0.0.0.0",
+    }, () => {
+      log(`serving on port ${port}`);
+      runMigrationScript();
+    });
+  }
 })();
 export default app;
