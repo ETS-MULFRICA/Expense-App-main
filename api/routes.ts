@@ -131,14 +131,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let limit = parseInt(rawLimit ?? '20');
       if (!Number.isFinite(limit) || limit <= 0) limit = 20;
       if (limit > 500) limit = 500;
+      // Audience filter: show global (all) plus any targeted to current user via a marker pattern
+      const me = req.user!.id;
       const r = await pool.query(
         `SELECT a.id, a.title, a.message, a.created_at, u.name as author_name
          FROM announcements a
          LEFT JOIN users u ON u.id = a.created_by
          WHERE a.published = TRUE
+           AND (
+             -- Show global announcements except password-reset ones
+             (COALESCE(a.audience,'all') = 'all' AND COALESCE(a.label,'') <> 'password-reset' AND (a.title IS NULL OR a.title NOT ILIKE 'Temporary password%'))
+             -- OR show items explicitly tagged for this user (per-user targeting)
+             OR a.message ILIKE $2 -- tag #user:<id>
+           )
          ORDER BY a.created_at DESC
          LIMIT $1`,
-        [limit]
+        [limit, `%#user:${me}%`]
       );
       res.json(r.rows);
     } catch (e) {
@@ -198,15 +206,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Unread count for current user
   app.get('/api/announcements/unread-count', requireAuth, async (req, res) => {
     try {
+      const me = req.user!.id;
       const r = await pool.query(
         `SELECT COUNT(*)::int AS count
          FROM announcements a
          WHERE a.published = TRUE
+           AND (
+             (COALESCE(a.audience,'all') = 'all' AND COALESCE(a.label,'') <> 'password-reset' AND (a.title IS NULL OR a.title NOT ILIKE 'Temporary password%'))
+             OR a.message ILIKE $2
+           )
            AND NOT EXISTS (
              SELECT 1 FROM announcement_reads ar
              WHERE ar.user_id = $1 AND ar.announcement_id = a.id
            )`,
-        [req.user!.id]
+        [me, `%#user:${me}%`]
       );
       res.json({ count: r.rows[0]?.count ?? 0 });
     } catch (e) {
@@ -219,16 +232,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/announcements/mark-read', requireAuth, async (req, res) => {
     try {
       // Insert reads for any published announcement not yet read
+      const me = req.user!.id;
       await pool.query(
         `INSERT INTO announcement_reads (user_id, announcement_id)
          SELECT $1, a.id
          FROM announcements a
          WHERE a.published = TRUE
+           AND (
+             (COALESCE(a.audience,'all') = 'all' AND COALESCE(a.label,'') <> 'password-reset' AND (a.title IS NULL OR a.title NOT ILIKE 'Temporary password%'))
+             OR a.message ILIKE $2
+           )
            AND NOT EXISTS (
              SELECT 1 FROM announcement_reads ar
              WHERE ar.user_id = $1 AND ar.announcement_id = a.id
            )`,
-        [req.user!.id]
+        [me, `%#user:${me}%`]
       );
       res.status(204).send();
     } catch (e) {
@@ -267,6 +285,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (e) {
       console.error('Create announcement failed', e);
       res.status(500).json({ message: 'Failed to create announcement' });
+    }
+  });
+
+  // Latest temporary password hint for the current user (used by login page)
+  app.get('/api/auth/temp-password-hint', async (req, res) => {
+    try {
+      // Use a header to pass intended username to avoid showing hints to others
+      const userHint = String(req.headers['x-username'] || '').trim();
+      if (!userHint) return res.status(200).json({});
+      const u = await pool.query('SELECT id FROM users WHERE username = $1', [userHint]);
+      if (u.rowCount === 0) return res.status(200).json({});
+      const userId = u.rows[0].id as number;
+      const r = await pool.query(
+        `SELECT id, temp_password, shown_on_login
+         FROM temp_passwords
+         WHERE user_id = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [userId]
+      );
+      const row = r.rows[0];
+      if (!row) return res.status(200).json({});
+      // Mark as shown_on_login once retrieved
+      if (!row.shown_on_login) {
+        try { await pool.query('UPDATE temp_passwords SET shown_on_login = TRUE WHERE id = $1', [row.id]); } catch {}
+      }
+      return res.json({ temporaryPassword: row.temp_password });
+    } catch (e) {
+      return res.status(200).json({});
     }
   });
 
@@ -3318,6 +3365,19 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requirePermission('
     const { hashPassword } = await import('./password');
     const hashed = await hashPassword(newPassword);
     await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, userId]);
+    // Save temp password for login-page hint
+    try { await pool.query('INSERT INTO temp_passwords (user_id, temp_password) VALUES ($1, $2)', [userId, newPassword]); } catch {}
+    // Create a targeted announcement for the user including a per-user tag
+    try {
+      const title = 'Temporary password set';
+      const message = `Your password was reset by an administrator. Your temporary password is: "${newPassword}". Please log in and change it immediately.\n#user:${userId}`;
+      // Mark as user-targeted, urgent, and labeled for moderation/history
+      await pool.query(
+        `INSERT INTO announcements (title, message, created_by, published, audience, priority, label)
+         VALUES ($1, $2, $3, TRUE, $4, $5, $6)`,
+        [title, message, req.user!.id, 'user', 'urgent', 'password-reset']
+      );
+    } catch {}
     try { await logActivity({ userId: req.user!.id, actionType: 'UPDATE', resourceType: 'USER', resourceId: userId, description: `Admin reset password for ${user.username}`, ipAddress: req.ip, userAgent: req.get('User-Agent'), metadata: { adminAction: 'reset-password' } }); } catch {}
     res.json({ message: 'Password reset', temporaryPassword: newPassword });
   } catch (error) {

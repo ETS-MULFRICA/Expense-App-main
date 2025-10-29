@@ -40,6 +40,7 @@ export default function AuthPage() {
   const { user, loginMutation, registerMutation } = useAuth();
   const [, navigate] = useLocation();
   const [activeTab, setActiveTab] = useState<string>("login");
+  const [tempHint, setTempHint] = useState<string>("");
 
   const loginForm = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
@@ -104,6 +105,11 @@ export default function AuthPage() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
+                  {tempHint ? (
+                    <div className="mb-3 p-3 rounded bg-yellow-50 text-yellow-800 text-sm border border-yellow-200">
+                      Temporary password for this account: <span className="font-mono font-semibold">{tempHint}</span>
+                    </div>
+                  ) : null}
                   <Form {...loginForm}>
                     <form onSubmit={loginForm.handleSubmit(onLoginSubmit)} className="space-y-4">
                       <FormField
@@ -113,7 +119,21 @@ export default function AuthPage() {
                           <FormItem>
                             <FormLabel>Username</FormLabel>
                             <FormControl>
-                              <Input placeholder="Enter your username" {...field} />
+                              <Input placeholder="Enter your username"
+                                {...field}
+                                onChange={(e)=>{
+                                  field.onChange(e);
+                                  const v = e.target.value.trim();
+                                  if (v.length >= 3) {
+                                    fetch('/api/auth/temp-password-hint', { headers: { 'x-username': v } })
+                                      .then(r=> r.json().catch(()=>({})))
+                                      .then((j)=> setTempHint(j?.temporaryPassword || ""))
+                                      .catch(()=> setTempHint(""));
+                                  } else {
+                                    setTempHint("");
+                                  }
+                                }}
+                              />
                             </FormControl>
                             <FormMessage />
                           </FormItem>

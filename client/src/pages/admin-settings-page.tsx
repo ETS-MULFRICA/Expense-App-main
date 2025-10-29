@@ -23,11 +23,8 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
   const [timezone, setTimezone] = useState('UTC');
   const [dateFormat, setDateFormat] = useState('yyyy-MM-dd');
   // Branding (theme now user-controlled; no admin control here)
-  // Email
-  const [emailFrom, setEmailFrom] = useState('');
-  const [emailTemplates, setEmailTemplates] = useState<any>({});
   // Features
-  const [features, setFeatures] = useState<any>({ allowRegistration: true, announcements: true, moderation: true, backups: true, reports: true });
+  const [features, setFeatures] = useState<any>({ allowRegistration: true, announcements: true, moderation: true, reports: true });
   // Security
   const [security, setSecurity] = useState<any>({ require2FA: false, passwordMinLength: 8 });
   // For change tracking
@@ -54,9 +51,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
         setTimezone(s.timezone ?? 'UTC');
         setDateFormat(s.date_format ?? 'yyyy-MM-dd');
   // themeMode removed from admin settings
-        setEmailFrom(s.email_from ?? '');
-        setEmailTemplates(s.email_templates ?? {});
-        setFeatures(s.features ?? { allowRegistration: true, announcements: true, moderation: true, backups: true, reports: true });
+  setFeatures(s.features ?? { allowRegistration: true, announcements: true, moderation: true, reports: true });
         setSecurity(s.security ?? { require2FA: false, passwordMinLength: 8 });
         setInitial(s);
       }
@@ -83,7 +78,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    siteName, logoDataUrl, defaultCurrency, language, emailFrom, emailTemplates,
+  siteName, logoDataUrl, defaultCurrency, language,
   timezone, dateFormat, /* faviconDataUrl removed */ features, security
   })
     });
@@ -142,8 +137,6 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       timezone,
       date_format: dateFormat,
   // theme_mode removed from admin page
-      email_from: emailFrom,
-      email_templates: emailTemplates,
       features,
       security,
     };
@@ -156,12 +149,10 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
       timezone: initial.timezone,
       date_format: initial.date_format,
   // theme_mode removed
-      email_from: initial.email_from,
-      email_templates: initial.email_templates,
       features: initial.features,
       security: initial.security,
     });
-  }, [initial, siteName, logoDataUrl, defaultCurrency, language, timezone, dateFormat, emailFrom, emailTemplates, features, security]);
+  }, [initial, siteName, logoDataUrl, defaultCurrency, language, timezone, dateFormat, features, security]);
 
   if (loading) return embedded ? <div className='p-6'>Loading…</div> : <MainLayout><div className='p-6'>Loading…</div></MainLayout>;
 
@@ -175,9 +166,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
     setTimezone(initial.timezone ?? 'UTC');
     setDateFormat(initial.date_format ?? 'yyyy-MM-dd');
   // theme_mode removed
-    setEmailFrom(initial.email_from ?? '');
-    setEmailTemplates(initial.email_templates ?? {});
-    setFeatures(initial.features ?? { allowRegistration: true, announcements: true, moderation: true, backups: true, reports: true });
+  setFeatures(initial.features ?? { allowRegistration: true, announcements: true, moderation: true, reports: true });
     setSecurity(initial.security ?? { require2FA: false, passwordMinLength: 8 });
   };
 
@@ -209,11 +198,10 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
         </div>
       </div>
       <Tabs defaultValue='site'>
-        <TabsList className='grid grid-cols-3 md:grid-cols-6'>
+        <TabsList className='grid grid-cols-3 md:grid-cols-5'>
           <TabsTrigger value='site'>Site Info</TabsTrigger>
           <TabsTrigger value='appearance'>Appearance</TabsTrigger>
           <TabsTrigger value='localization'>Localization</TabsTrigger>
-          <TabsTrigger value='email'>Email</TabsTrigger>
           <TabsTrigger value='security'>Security</TabsTrigger>
           <TabsTrigger value='features'>Features</TabsTrigger>
         </TabsList>
@@ -299,12 +287,7 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
             </div>
           </Section>
         </TabsContent>
-        <TabsContent value='email' className='space-y-4 mt-4'>
-          {/* Removed first Email Settings panel per request; keep only direct email */}
-          <Section title='Send Direct Email' badge={undefined}>
-            <DirectEmailPanel />
-          </Section>
-        </TabsContent>
+  {/* Email tab removed per request */}
         <TabsContent value='security' className='space-y-4 mt-4'>
           <Section title='Security' badge={modified ? 'Modified' : undefined}>
             <div className='flex items-center justify-between'>
@@ -326,7 +309,6 @@ export default function AdminSettingsPage({ embedded = false }: { embedded?: boo
               { key: 'allowRegistration', label: 'Allow Registration', desc: 'Users can sign up without invitation.' },
               { key: 'announcements', label: 'Announcements', desc: 'Enable global announcements.' },
               { key: 'moderation', label: 'Moderation', desc: 'Enable reporting and moderation tools.' },
-              { key: 'backups', label: 'Backups', desc: 'Allow DB backup/restore from Admin.' },
               { key: 'reports', label: 'Reports & Analytics', desc: 'Enable reporting pages.' },
             ].map(item => (
               <div key={item.key} className='flex items-center justify-between py-1'>

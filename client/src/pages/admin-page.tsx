@@ -1250,7 +1250,6 @@ export default function AdminPage() {
           <TabsContent value="system-settings">
             <div className="space-y-6">
               <AdminSettingsPage embedded />
-              <BackupPanel />
               <LoginAttemptsPanel />
             </div>
           </TabsContent>
@@ -1532,8 +1531,6 @@ function AnnouncementsManager() {
                 </div>
               </div>
               <div className="shrink-0 flex gap-2">
-                <Button variant="outline" size="sm">Stats</Button>
-                <Button variant="outline" size="sm" onClick={() => { setCreating(true); setTitle(a.title); setMessage(a.message); setLabel(a.label||''); setPriority(a.priority||'normal'); }}>Edit</Button>
                 <Button variant="outline" size="sm" className="text-red-600 border-red-200" onClick={() => remove(a.id)}>Delete</Button>
               </div>
             </div>
@@ -1689,92 +1686,7 @@ function ModerationManager({ loadingId, setLoadingId }: { loadingId: number | nu
   );
 }
 
-function BackupPanel() {
-  const { toast } = useToast();
-  const { data: backups, refetch, isFetching } = useQuery({
-    queryKey: ['/api/admin/backups'],
-    queryFn: async () => {
-      const r = await fetch('/api/admin/backups');
-      if (!r.ok) throw new Error('Failed to list backups');
-      return r.json();
-    }
-  });
-  const [restoreTarget, setRestoreTarget] = useState<null | { file: string }>(null);
-  const trigger = async () => {
-    const r = await fetch('/api/admin/backup', { method: 'POST' });
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({}));
-      toast({ title: 'Backup failed', description: e?.message || 'pg_dump not available?', variant: 'destructive' });
-      return;
-    }
-    const data = await r.json();
-    toast({ title: 'Backup started', description: data.file || 'Backup complete' });
-    refetch();
-  };
-  const fmtSize = (n: number) => {
-    if (!Number.isFinite(n)) return '-';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    let u = 0; let v = n;
-    while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
-    return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[u]}`;
-  };
-  const restore = async (file: string) => {
-    const r = await fetch('/api/admin/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file, confirm: true }) });
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({}));
-      toast({ title: 'Restore failed', description: e?.message || 'psql not available or permission denied', variant: 'destructive' });
-      return;
-    }
-    toast({ title: 'Restore complete', description: `Database restored from ${file}` });
-    setRestoreTarget(null);
-  };
-  return (
-    <>
-    <Card>
-      <CardHeader>
-        <CardTitle>Database Backup</CardTitle>
-        <CardDescription>Create and download SQL backups</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-center gap-2 mb-4">
-          <Button onClick={trigger} disabled={isFetching}><RefreshCw className="h-4 w-4 mr-2" />Trigger Backup</Button>
-          <Button variant="outline" onClick={() => refetch()}>Refresh List</Button>
-        </div>
-        <div className="text-sm text-gray-600 mb-2">Latest backups</div>
-        <ul className="space-y-2">
-          {Array.isArray(backups) && backups.length ? backups.map((b: any) => (
-            <li key={b.file} className="flex flex-col md:flex-row md:justify-between md:items-center border rounded p-2 gap-2">
-              <div className="min-w-0">
-                <div className="font-mono text-xs break-all">{b.file}</div>
-                <div className="text-xs text-gray-500">{b.createdAt ? new Date(b.createdAt).toLocaleString() : ''} · {fmtSize(b.size)}</div>
-              </div>
-              <div className="flex items-center gap-2">
-                <a className="underline text-sm" href={`/api/admin/backups/${encodeURIComponent(b.file)}`}>Download</a>
-                <Button variant="destructive" size="sm" onClick={() => setRestoreTarget({ file: b.file })}>Restore</Button>
-              </div>
-            </li>
-          )) : <li className="text-sm text-gray-500">No backups yet.</li>}
-        </ul>
-        <div className="text-xs text-gray-500 mt-3">If trigger fails, ensure pg_dump is installed and DB env vars are set. You can also run a manual dump using documented scripts.</div>
-      </CardContent>
-    </Card>
-    <AlertDialog open={!!restoreTarget} onOpenChange={(o) => !o && setRestoreTarget(null)}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Restore database?</AlertDialogTitle>
-          <AlertDialogDescription>
-            This will run the selected SQL dump against your database and may overwrite data. This action cannot be undone.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={() => restoreTarget && restore(restoreTarget.file)}>Yes, restore</AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-    </>
-  );
-}
+// BackupPanel removed as requested
 
 function LoginAttemptsPanel() {
   const { data, isLoading } = useQuery({
